@@ -2014,8 +2014,20 @@ def _count_files_in_tree(directory: Optional[str]) -> int:
 
 
 def _load_intelligence_vulnerability_counts(intelligence_dir: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
-    # Prefer live, in-memory data from the intelligence engine when available so
-    # dashboard cards stay aligned with the Threat Intel tab.
+    # scan_findings is the canonical store (written by every scanner run).
+    # Query it first so this matches sync_vulnerability_count() exactly.
+    try:
+        _db = get_db()
+        with _db.get_connection() as _conn:
+            row = _conn.execute(
+                "SELECT COUNT(*) as cnt, COUNT(DISTINCT host) as hosts FROM scan_findings"
+            ).fetchone()
+            if row and (row['cnt'] or 0) > 0:
+                return safe_int(row['cnt'], 0), safe_int(row['hosts'], 0)
+    except Exception as _e:
+        logger.debug(f"scan_findings count in _load_intelligence_vulnerability_counts: {_e}")
+
+    # Fallback: live network intelligence (may include stale pre-filter data)
     try:
         network_intel = getattr(shared_data, 'network_intelligence', None)
         intel_enabled = getattr(shared_data, 'config', {}).get('network_intelligence_enabled', True)
