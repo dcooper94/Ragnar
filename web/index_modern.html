@@ -4812,9 +4812,10 @@
                             <div class="flex-1">
                                 <h4 class="font-medium text-lg mb-2">AI-Powered Network Analysis</h4>
                                 <p class="text-sm text-gray-400 mb-4">
-                                    Enable AI insights to get intelligent analysis of your network vulnerabilities, threat assessments, and actionable recommendations powered by OpenAI.
+                                    Enable AI insights for vulnerability analysis and network intelligence. Use OpenAI cloud or a local model via Ollama or LM Studio.
                                 </p>
-                                <div class="space-y-3">
+                                <div class="space-y-4">
+                                    <!-- Enable toggle -->
                                     <div>
                                         <label class="flex items-center space-x-3 cursor-pointer">
                                             <input type="checkbox" id="ai-enabled-toggle" onchange="toggleAIEnabled()" class="w-5 h-5 rounded border-gray-600 text-purple-600 focus:ring-purple-500 focus:ring-offset-gray-900">
@@ -4822,7 +4823,21 @@
                                         </label>
                                         <p class="text-xs text-gray-500 ml-0 sm:ml-8 mt-1">Activate AI-powered vulnerability analysis and network intelligence</p>
                                     </div>
+
+                                    <!-- Provider selector -->
                                     <div>
+                                        <label for="ai-provider-select" class="block text-sm font-medium text-gray-300 mb-2">AI Provider</label>
+                                        <select id="ai-provider-select" onchange="onAIProviderChange()"
+                                                class="w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                            <option value="openai">OpenAI (Cloud)</option>
+                                            <option value="ollama">Ollama (Local)</option>
+                                            <option value="lmstudio">LM Studio (Local)</option>
+                                            <option value="custom">Custom Endpoint</option>
+                                        </select>
+                                    </div>
+
+                                    <!-- OpenAI token (cloud only) -->
+                                    <div id="ai-openai-fields">
                                         <label for="openai-api-token" class="block text-sm font-medium text-gray-300 mb-2">OpenAI API Token</label>
                                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                                             <input type="password" id="openai-api-token" autocomplete="off" placeholder="sk-..."
@@ -4835,6 +4850,33 @@
                                             Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank" class="text-purple-400 hover:text-purple-300 underline">OpenAI Platform</a>
                                         </p>
                                     </div>
+
+                                    <!-- Local / custom provider fields -->
+                                    <div id="ai-local-fields" class="hidden space-y-3">
+                                        <div>
+                                            <label for="ai-base-url" class="block text-sm font-medium text-gray-300 mb-2">Endpoint URL</label>
+                                            <input type="text" id="ai-base-url" autocomplete="off"
+                                                   placeholder="http://localhost:11434/v1"
+                                                   class="w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                            <p class="text-xs text-gray-500 mt-1">
+                                                Ollama: <code class="text-purple-300">http://localhost:11434/v1</code> &nbsp;|&nbsp;
+                                                LM Studio: <code class="text-purple-300">http://localhost:1234/v1</code>
+                                            </p>
+                                        </div>
+                                        <div>
+                                            <label for="ai-local-model" class="block text-sm font-medium text-gray-300 mb-2">Model Name</label>
+                                            <input type="text" id="ai-local-model" autocomplete="off"
+                                                   placeholder="llama3.2"
+                                                   class="w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                            <p class="text-xs text-gray-500 mt-1">
+                                                The model name as shown in Ollama/LM Studio — e.g. <code class="text-purple-300">llama3.2</code>, <code class="text-purple-300">mistral</code>, <code class="text-purple-300">qwen2.5</code>
+                                            </p>
+                                        </div>
+                                        <button onclick="saveAIProvider()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors w-full sm:w-auto">
+                                            Save Local AI Config
+                                        </button>
+                                    </div>
+
                                     <div id="ai-config-status" class="hidden p-3 rounded-lg text-sm">
                                         <span id="ai-config-status-message"></span>
                                     </div>
@@ -4847,8 +4889,8 @@
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                 </svg>
                                 <div class="text-xs text-gray-400">
-                                    <p class="mb-1"><strong class="text-gray-300">Privacy:</strong> API calls are sent directly to OpenAI.</p>
-                                    <p><strong class="text-gray-300">Cost:</strong> AI features consume OpenAI API credits based on usage. Monitor your usage at OpenAI's platform.</p>
+                                    <p class="mb-1"><strong class="text-gray-300">OpenAI:</strong> API calls are sent to OpenAI's servers. Consumes API credits.</p>
+                                    <p><strong class="text-gray-300">Local:</strong> All inference runs on your own hardware — no cloud, no cost, no data leaves the network.</p>
                                 </div>
                             </div>
                         </div>

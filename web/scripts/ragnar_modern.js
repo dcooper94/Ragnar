@@ -11343,8 +11343,61 @@ async function saveConfig(form) {
 }
 
 // AI Configuration Functions
+
+function onAIProviderChange() {
+    const provider = document.getElementById('ai-provider-select')?.value || 'openai';
+    const openaiFields = document.getElementById('ai-openai-fields');
+    const localFields = document.getElementById('ai-local-fields');
+    if (!openaiFields || !localFields) return;
+
+    if (provider === 'openai') {
+        openaiFields.classList.remove('hidden');
+        localFields.classList.add('hidden');
+    } else {
+        openaiFields.classList.add('hidden');
+        localFields.classList.remove('hidden');
+
+        // Pre-fill the default URL for known providers
+        const urlInput = document.getElementById('ai-base-url');
+        if (urlInput && !urlInput.value) {
+            const defaults = {
+                ollama:   'http://localhost:11434/v1',
+                lmstudio: 'http://localhost:1234/v1',
+            };
+            urlInput.placeholder = defaults[provider] || 'http://localhost:11434/v1';
+        }
+    }
+}
+
+async function saveAIProvider() {
+    const provider  = document.getElementById('ai-provider-select')?.value || 'openai';
+    const baseUrl   = document.getElementById('ai-base-url')?.value.trim() || '';
+    const localModel = document.getElementById('ai-local-model')?.value.trim() || '';
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMsg = document.getElementById('ai-config-status-message');
+
+    try {
+        const payload = { ai_provider: provider };
+        if (baseUrl)    payload.ai_base_url    = baseUrl;
+        if (localModel) payload.ai_local_model = localModel;
+
+        const result = await postAPI('/api/config', payload);
+
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700';
+        statusMsg.textContent = `✓ Local AI config saved (${provider}${localModel ? ' / ' + localModel : ''}). Re-enable AI Insights to apply.`;
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => statusDiv.classList.add('hidden'), 5000);
+    } catch (error) {
+        console.error('Failed to save AI provider config:', error);
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+        statusMsg.textContent = `✗ Failed to save AI config: ${error.message || 'unknown error'}`;
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => statusDiv.classList.add('hidden'), 5000);
+    }
+}
+
 async function loadAIConfiguration(config) {
-    // Mirror current configuration for AI enable toggle
+    // Enable toggle
     const aiEnabledCheckbox = document.getElementById('ai-enabled-toggle');
     if (aiEnabledCheckbox) {
         const aiEnabled = config && Object.prototype.hasOwnProperty.call(config, 'ai_enabled')
@@ -11352,14 +11405,30 @@ async function loadAIConfiguration(config) {
             : false;
         aiEnabledCheckbox.checked = aiEnabled;
     }
-    
+
+    // Provider selector
+    const providerSelect = document.getElementById('ai-provider-select');
+    if (providerSelect && config?.ai_provider) {
+        providerSelect.value = config.ai_provider;
+    }
+    onAIProviderChange();
+
+    // Local fields
+    const baseUrlInput = document.getElementById('ai-base-url');
+    if (baseUrlInput && config?.ai_base_url) {
+        baseUrlInput.value = config.ai_base_url;
+    }
+    const localModelInput = document.getElementById('ai-local-model');
+    if (localModelInput && config?.ai_local_model) {
+        localModelInput.value = config.ai_local_model;
+    }
+
     // Fetch token status from environment variable
     try {
         const tokenStatus = await fetchAPI('/api/ai/token');
         const apiTokenInput = document.getElementById('openai-api-token');
         if (apiTokenInput) {
             if (tokenStatus.configured && tokenStatus.token_preview) {
-                // Show preview of token
                 apiTokenInput.value = '';
                 apiTokenInput.placeholder = `Configured: ${tokenStatus.token_preview}`;
             } else {
