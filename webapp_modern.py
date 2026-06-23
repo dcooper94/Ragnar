@@ -4333,6 +4333,20 @@ def get_network_topology():
             # ----------------------------------------------------------
             # Phase 1: fast rule-based classification (no AI calls)
             # ----------------------------------------------------------
+            # Collect all local IPs (Ragnar can be on WiFi + Ethernet simultaneously)
+            ragnar_ips: set = set()
+            try:
+                import netifaces as _nif
+                for _iface in _nif.interfaces():
+                    for _addr in _nif.ifaddresses(_iface).get(_nif.AF_INET, []):
+                        _a = _addr.get('addr', '')
+                        if _a and not _a.startswith('127.') and not _a.startswith('169.254.'):
+                            ragnar_ips.add(_a)
+            except Exception:
+                pass
+            if ragnar_ip:
+                ragnar_ips.add(ragnar_ip)
+
             nodes = []
             node_ids = set()
             low_confidence_indices = []  # indices of nodes needing AI help
@@ -4378,7 +4392,7 @@ def get_network_topology():
                     'risk': risk,
                     'last_seen': host.get('last_seen', ''),
                     'is_gateway': ip == gateway_ip,
-                    'is_ragnar': ip == ragnar_ip,
+                    'is_ragnar': ip in ragnar_ips,
                 }
                 nodes.append(node)
                 node_ids.add(ip)

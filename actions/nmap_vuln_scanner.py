@@ -701,6 +701,29 @@ class NmapVulnScanner:
                     except Exception as e:
                         logger.warning(f"Failed to add vulnerability to network intelligence: {e}")
 
+                    # Mirror to scan_findings so sync_vulnerability_count() has a stable SQL source
+                    try:
+                        cve_m = re.search(r'(CVE-\d{4}-\d+)', normalized_text)
+                        score_m = re.search(r'Score:\s*(\d{1,2}\.\d)', normalized_text)
+                        cve_id = cve_m.group(1) if cve_m else None
+                        cvss = float(score_m.group(1)) if score_m else None
+                        _fid = f"nmap-{ip}-{port_str}-{cve_id or normalized_text[:30].replace(' ','_')}"
+                        self.db.save_scan_finding(
+                            finding_id=_fid,
+                            scan_id="nmap_vulners",
+                            scanner="nmap-vulners",
+                            host=ip,
+                            port=int(port_str) if str(port_str).isdigit() else None,
+                            severity=severity,
+                            title=cve_id or normalized_text[:100],
+                            description=normalized_text,
+                            cve_ids=[cve_id] if cve_id else None,
+                            cvss_score=cvss,
+                            raw_output=vulnerability,
+                        )
+                    except Exception as sf_err:
+                        logger.debug(f"scan_findings write skipped: {sf_err}")
+
         except Exception as e:
             logger.error(f"Error feeding vulnerabilities to network intelligence: {e}")
 
