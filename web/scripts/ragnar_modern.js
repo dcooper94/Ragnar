@@ -13593,7 +13593,7 @@ function displayGroupedVulnerabilities(data) {
                                                 </div>
                                                 <div class="text-sm text-white font-mono">${vulnText}</div>
                                             </div>
-                                            <button onclick='showVulnerabilityDetails(${JSON.stringify(vuln).replace(/'/g, "\\'")})' 
+                                            <button onclick='showVulnerabilityDetails(${JSON.stringify({...vuln, host: hostData.ip}).replace(/'/g, "\\'")})' 
                                                     class="ml-2 text-Ragnar-400 hover:text-Ragnar-300 text-xs">
                                                 Details
                                             </button>
