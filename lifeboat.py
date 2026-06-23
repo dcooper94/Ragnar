@@ -115,10 +115,17 @@ def _svc_active(name: str) -> bool:
 
 
 def _swap(target: str):
-    stop, start = ("pwnagotchi", "ragnar") if target == "ragnar" else ("ragnar", "pwnagotchi")
+    if target not in ("ragnar", "pwnagotchi"):
+        return False, "Unknown target"
     try:
-        subprocess.run(["systemctl", "stop", stop], timeout=30)
-        subprocess.run(["systemctl", "start", start], timeout=30)
+        if target == "pwnagotchi":
+            subprocess.run(["systemctl", "stop", "ragnar.service"], timeout=30, check=False)
+            subprocess.run(["systemctl", "start", "bettercap.service"], timeout=30, check=False)
+            subprocess.run(["systemctl", "start", "pwnagotchi.service"], timeout=30)
+        else:
+            subprocess.run(["systemctl", "stop", "pwnagotchi.service"], timeout=30, check=False)
+            subprocess.run(["systemctl", "stop", "bettercap.service"], timeout=30, check=False)
+            subprocess.run(["systemctl", "start", "ragnar.service"], timeout=30)
         return True, f"Switched to {target}"
     except Exception as exc:
         return False, str(exc)

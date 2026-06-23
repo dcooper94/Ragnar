@@ -1376,20 +1376,37 @@ def _execute_pwn_mode_switch(target_mode: str) -> None:
         # "&& start pwnagotchi" tail would never execute.  systemd-run launches
         # the sequence in its own transient cgroup, fully outside ragnar.service,
         # so it survives ragnar's cgroup teardown.
+        # Build the swap + recovery bash script.
+        # Key design decisions:
+        # - bettercap start is attempted but NOT required (|| true) so a missing
+        #   bettercap installation never prevents pwnagotchi from starting.
+        # - After a 30-second settling window, we check if pwnagotchi is still
+        #   active. If it has crashed (common on first run / bad config), we
+        #   automatically restart Ragnar so the device doesn't go dark.
+        # - ragnar-swap-button.service is also optional (|| true).
+        swap_script = (
+            'systemctl stop ragnar.service'
+            ' && python3 -OO /home/ragnar/Ragnar/wipe_epd.py 2>/dev/null; true'
+            ' && systemctl start bettercap.service || true'
+            ' && systemctl start pwnagotchi.service'
+            ' && systemctl start ragnar-swap-button.service || true'
+            # Health check: wait 30 s then verify pwnagotchi is still active.
+            # If it crashed, restart Ragnar as a fallback.
+            ' && sleep 30'
+            ' && systemctl is-active --quiet pwnagotchi.service'
+            ' || ( journalctl -u pwnagotchi.service -n 20 --no-pager'
+            '      > /tmp/ragnar-pwn-crash.log 2>&1;'
+            '      systemctl start ragnar.service )'
+        )
         try:
             subprocess.Popen(
                 ['systemd-run', '--no-block', '--collect',
                  '--unit=ragnar-to-pwnagotchi-swap',
-                 'bash', '-c',
-                 'systemctl stop ragnar.service'
-                 ' && python3 -OO /home/ragnar/Ragnar/wipe_epd.py 2>/dev/null; true'
-                 ' && systemctl start bettercap.service'
-                 ' && systemctl start pwnagotchi.service'
-                 ' && systemctl start ragnar-swap-button.service'],
+                 'bash', '-c', swap_script],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            logger.info("Scheduled systemd-run swap: stop ragnar → start pwnagotchi")
+            logger.info("Scheduled systemd-run swap: stop ragnar → start pwnagotchi (with crash recovery)")
         except Exception as exc:
             logger.error(f"Failed to schedule pwnagotchi start sequence: {exc}")
         return
