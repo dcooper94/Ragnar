@@ -576,9 +576,11 @@ class NmapVulnScanner:
                     summary_entries.add(f"{current_port}/{current_service}: {cleaned_line}")
                     continue
                 
-                # Also capture lines with vulnerability scores (numeric patterns)
+                # Also capture lines with vulnerability scores, but only if they also carry
+            # a real CVE ID — avoids storing Vulners-internal IDs (SSV:, CNVD-, etc.)
+            # that have no NVD entry and produce broken links in the UI.
                 score_pattern = re.search(r'\s+(\d+\.\d+|\d+)\s+https?://', cleaned_line)
-                if score_pattern and in_vulners_section:
+                if score_pattern and in_vulners_section and re.search(r'CVE-\d{4}-\d+', cleaned_line):
                     port_vulnerabilities.setdefault(current_port, []).append(cleaned_line)
                     summary_entries.add(f"{current_port}/{current_service}: {cleaned_line}")
 
@@ -590,8 +592,13 @@ class NmapVulnScanner:
         normalized_text = vulnerability_text
         severity = "medium"
 
-        cve_match = re.search(r"(CVE-\d{4}-\d+)", vulnerability_text)
-        
+        cve_match = re.search(r"(CVE-(\d{4})-\d+)", vulnerability_text)
+        # Reject CVE IDs with impossible years (vulners can return junk matches)
+        if cve_match:
+            cve_year = int(cve_match.group(2))
+            if not (1999 <= cve_year <= datetime.now().year + 1):
+                cve_match = None
+
         # Look for CVSS score AFTER the CVE ID to avoid matching the year in CVE-YYYY-NNNNN
         # CVSS scores are typically 0.0-10.0, so we look for patterns like "7.5" or standalone decimals
         # that appear after any CVE ID in the text
@@ -605,7 +612,7 @@ class NmapVulnScanner:
             score_match = re.search(r'(\d{1,2}\.\d+)', vulnerability_text)
 
         if cve_match:
-            normalized_text = cve_match.group(1)
+            normalized_text = cve_match.group(1)  # group(1) is the full CVE-YYYY-NNN string
             if score_match:
                 try:
                     score_value = float(score_match.group(1))
