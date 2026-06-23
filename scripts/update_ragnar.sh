@@ -134,6 +134,16 @@ except Exception as e:
     print(f"ERROR validating actions.json: {e}")
 PYTHON_EOF
 
+echo -e "${BLUE}Step 6.6b: Installing/updating Ragnar Lifeboat...${NC}"
+LIFEBOAT_SERVICE="/etc/systemd/system/ragnar-lifeboat.service"
+if [[ ! -f "$LIFEBOAT_SERVICE" ]]; then
+    if [[ -f "$ragnar_PATH/scripts/install_lifeboat.sh" ]]; then
+        bash "$ragnar_PATH/scripts/install_lifeboat.sh" && echo -e "${GREEN}Lifeboat installed on port 8001.${NC}"
+    fi
+else
+    systemctl restart ragnar-lifeboat >/dev/null 2>&1 && echo -e "${GREEN}Lifeboat restarted.${NC}" || true
+fi
+
 echo -e "${BLUE}Step 6.7: Checking Pwnagotchi migration...${NC}"
 MIGRATE_SCRIPT="$ragnar_PATH/scripts/migrate_pwnagotchi.sh"
 if [[ -d "/opt/pwnagotchi" ]] && [[ -f "$MIGRATE_SCRIPT" ]]; then
