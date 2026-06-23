@@ -17794,30 +17794,54 @@ def exploit_lookup():
     data = request.get_json() or {}
     cve = re.sub(r'\s+', '', (data.get('cve') or '')).upper()
     service = (data.get('service') or '').strip()
+    vuln_text = (data.get('vuln_text') or '')
 
     if not cve and not service:
         return jsonify({'error': 'cve or service required'}), 400
 
+    # Parse exploit references already present in the scan text
+    scan_refs = []
+    edb_ids = re.findall(r'EDB-(\d+)', vuln_text, re.IGNORECASE)
+    for eid in edb_ids:
+        scan_refs.append({
+            'title': f'ExploitDB EDB-{eid} (found in scan)',
+            'url': f'https://www.exploit-db.com/exploits/{eid}',
+            'edb_id': eid,
+        })
+    msf_mods = re.findall(r'MSF:([\w/]+)', vuln_text, re.IGNORECASE)
+    for mod in msf_mods:
+        scan_refs.append({
+            'title': f'Metasploit module: {mod} (found in scan)',
+            'url': f'https://www.rapid7.com/db/search/?q={mod}',
+            'msf_module': mod,
+        })
+
+    # Always provide direct CVE database links
+    cve_links = []
+    if cve:
+        cve_links = [
+            {'name': 'NVD', 'url': f'https://nvd.nist.gov/vuln/detail/{cve}'},
+            {'name': 'MITRE', 'url': f'https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve}'},
+            {'name': 'ExploitDB Search', 'url': f'https://www.exploit-db.com/search?cve={cve.replace("CVE-","")}'},
+            {'name': 'GitHub PoC', 'url': f'https://github.com/search?q={cve}&type=repositories'},
+        ]
+
     result = {
         'searchsploit': [],
         'metasploit': [],
+        'scan_refs': scan_refs,
+        'cve_links': cve_links,
         'searchsploit_available': bool(shutil.which('searchsploit')),
         'msf_available': bool(shutil.which('msfconsole')),
     }
 
     if result['searchsploit_available']:
         try:
-            if cve:
-                cve_num = re.sub(r'^CVE-', '', cve)
-                r = subprocess.run(
-                    ['searchsploit', '--cve', cve_num, '--json'],
-                    capture_output=True, text=True, timeout=30
-                )
-            else:
-                r = subprocess.run(
-                    ['searchsploit', '--json', service],
-                    capture_output=True, text=True, timeout=30
-                )
+            search_term = cve if cve else service
+            r = subprocess.run(
+                ['searchsploit', '--json', search_term],
+                capture_output=True, text=True, timeout=30
+            )
             raw = json.loads(r.stdout)
             result['searchsploit'] = [
                 {

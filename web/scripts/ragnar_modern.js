@@ -13002,14 +13002,14 @@ function exploitVulnerability(entry) {
     const host = entry.host || '';
     const port = (entry.port || '').toString().replace(/\/tcp|\/udp/i, '');
     const service = entry.service || '';
-    openExploitModal(host, port, cve, service);
+    openExploitModal(host, port, cve, service, entry.description || '');
 }
 
 function exploitVulnFromModal(vuln) {
     const cveMatch = (vuln.vulnerability || '').match(/CVE-\d{4}-\d+/i);
     const cve = cveMatch ? cveMatch[0].toUpperCase() : '';
     const port = (vuln.port || '').toString().replace(/\/tcp|\/udp/i, '');
-    openExploitModal(vuln.host || '', port, cve, vuln.service || '');
+    openExploitModal(vuln.host || '', port, cve, vuln.service || '', vuln.vulnerability || '');
 }
 
 let _exploitPollTimer = null;
@@ -13086,7 +13086,7 @@ function _injectExploitModal() {
     document.body.appendChild(modal);
 }
 
-function openExploitModal(host, port, cve, service) {
+function openExploitModal(host, port, cve, service, vulnText) {
     if (!document.getElementById('exploit-launcher-modal')) {
         _injectExploitModal();
     }
@@ -13099,7 +13099,7 @@ function openExploitModal(host, port, cve, service) {
     document.getElementById('exploit-no-results').style.display = 'none';
     document.getElementById('exploit-output-section').style.display = 'none';
     document.getElementById('exploit-launcher-modal').style.display = 'flex';
-    _loadExploitLookup(cve, service);
+    _loadExploitLookup(cve, service, vulnText || '');
 }
 
 function closeExploitModal() {
@@ -13108,20 +13108,40 @@ function closeExploitModal() {
     if (_exploitPollTimer) { clearInterval(_exploitPollTimer); _exploitPollTimer = null; }
 }
 
-async function _loadExploitLookup(cve, service) {
+async function _loadExploitLookup(cve, service, vulnText) {
     try {
         const resp = await fetch('/api/exploit/lookup', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({cve, service})
+            body: JSON.stringify({cve, service, vuln_text: vulnText})
         });
         const data = await resp.json();
         document.getElementById('exploit-loading').style.display = 'none';
         let hasResults = false;
 
+        // Scan-embedded exploit references (EDB IDs, MSF modules in raw scan output)
+        if (data.scan_refs && data.scan_refs.length > 0) {
+            hasResults = true;
+            const scanSection = document.getElementById('exploit-searchsploit-section');
+            const scanResults = document.getElementById('exploit-searchsploit-results');
+            scanResults.innerHTML = data.scan_refs.map(r => `
+                <div class="bg-slate-800 rounded-lg p-3 flex items-start justify-between gap-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="text-sm text-white font-medium">${r.title}</div>
+                    </div>
+                    <a href="${r.url}" target="_blank" rel="noopener noreferrer"
+                       class="shrink-0 px-2 py-1 text-xs bg-blue-700 hover:bg-blue-600 text-white rounded">
+                        Open
+                    </a>
+                </div>
+            `).join('') + (scanResults.innerHTML || '');
+            scanSection.style.display = 'block';
+        }
+
         if (data.searchsploit && data.searchsploit.length > 0) {
             hasResults = true;
-            document.getElementById('exploit-searchsploit-results').innerHTML = data.searchsploit.map(e => `
+            const existing = document.getElementById('exploit-searchsploit-results').innerHTML;
+            document.getElementById('exploit-searchsploit-results').innerHTML = existing + data.searchsploit.map(e => `
                 <div class="bg-slate-800 rounded-lg p-3 flex items-start justify-between gap-3">
                     <div class="flex-1 min-w-0">
                         <div class="text-sm text-white font-medium">${e.title}</div>
@@ -13156,6 +13176,25 @@ async function _loadExploitLookup(cve, service) {
                 </div>
             `).join('');
             document.getElementById('exploit-msf-section').style.display = 'block';
+        }
+
+        // Always show CVE reference links
+        if (data.cve_links && data.cve_links.length > 0) {
+            hasResults = true;
+            const linksHtml = `
+                <div style="margin-top:12px;padding:12px;background:#1e293b;border-radius:8px">
+                    <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">CVE References &amp; Search</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:8px">
+                        ${data.cve_links.map(l => `
+                            <a href="${l.url}" target="_blank" rel="noopener noreferrer"
+                               style="padding:4px 10px;background:#334155;border-radius:6px;font-size:12px;color:#e2e8f0;text-decoration:none">
+                                ${l.name} ↗
+                            </a>
+                        `).join('')}
+                    </div>
+                </div>`;
+            document.getElementById('exploit-searchsploit-section').style.display = 'block';
+            document.getElementById('exploit-searchsploit-results').innerHTML += linksHtml;
         }
 
         if (!hasResults) {
