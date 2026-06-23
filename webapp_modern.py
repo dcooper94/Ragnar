@@ -9396,13 +9396,26 @@ def reset_vulnerabilities():
         if os.path.exists(scanned_ports_history_file):
             try:
                 os.remove(scanned_ports_history_file)
-                logger.info("✅ Cleared scan history cache - all hosts will be rescanned on next vulnerability scan")
+                logger.info("Cleared scan history cache - all hosts will be rescanned on next vulnerability scan")
             except Exception as e:
                 logger.error(f"Error clearing scan history cache: {e}")
-        
+
+        # Clear scan_findings SQLite table (primary persistent store for all vuln findings)
+        try:
+            db = get_db()
+            with db.get_connection() as conn:
+                c = conn.execute("DELETE FROM scan_findings")
+                sf_deleted = c.rowcount
+                conn.execute("UPDATE hosts SET vulnerabilities = ''")
+                conn.commit()
+            logger.info(f"Cleared {sf_deleted} rows from scan_findings and reset host vulnerability columns")
+            deleted_count += sf_deleted
+        except Exception as e:
+            logger.error(f"Error clearing scan_findings from database: {e}")
+
         # Reset vulnerability counter
         shared_data.vulnnbr = 0
-        
+
         # Trigger sync
         sync_vulnerability_count()
         
