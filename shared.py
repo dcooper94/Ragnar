@@ -526,6 +526,10 @@ class SharedData:
         self.ftpfile = os.path.join(self.crackedpwddir, "ftp.csv")
         self.sqlfile = os.path.join(self.crackedpwddir, "sql.csv")
         self.rdpfile = os.path.join(self.crackedpwddir, "rdp.csv")
+        self.snmpfile = os.path.join(self.crackedpwddir, "snmp.csv")
+        self.vncfile = os.path.join(self.crackedpwddir, "vnc.csv")
+        self.redisfile = os.path.join(self.crackedpwddir, "redis.csv")
+        self.postgresfile = os.path.join(self.crackedpwddir, "postgres.csv")
 
     def set_active_network(self, ssid):
         """Public entry point for Wi-Fi manager to switch all storage."""
