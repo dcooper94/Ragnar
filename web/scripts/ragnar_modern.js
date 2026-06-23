@@ -13590,9 +13590,10 @@ function toggleHostDetails(hostId) {
 
 // Show vulnerability details modal
 function showVulnerabilityDetails(vuln) {
+    window._currentThreatVuln = vuln;
     const modal = document.getElementById('vulnerability-detail-modal');
     const content = document.getElementById('vuln-detail-content');
-    
+
     const severityColors = {
         'critical': 'text-red-400',
         'high': 'text-orange-400',
@@ -13697,7 +13698,7 @@ function showVulnerabilityDetails(vuln) {
             </div>
 
             <div class="pt-2">
-                <button onclick="exploitVulnFromModal(${JSON.stringify(vuln).replace(/</g,'\\u003c').replace(/>/g,'\\u003e').replace(/&/g,'\\u0026')})"
+                <button onclick="exploitVulnFromModal(window._currentThreatVuln)"
                         class="w-full py-2.5 px-4 bg-orange-600 hover:bg-orange-500 text-white font-semibold rounded-lg flex items-center justify-center gap-2 transition-colors">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
