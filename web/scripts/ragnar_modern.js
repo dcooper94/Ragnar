@@ -13027,67 +13027,91 @@ function _injectExploitModal() {
     modal.id = 'exploit-launcher-modal';
     modal.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.82);align-items:center;justify-content:center;z-index:9999;';
     modal.innerHTML = `
-        <div class="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-3xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-            <div class="flex items-center justify-between mb-5">
-                <div class="flex items-center gap-3">
-                    <div class="w-9 h-9 bg-orange-500/20 rounded-lg flex items-center justify-center">
-                        <svg class="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                        </svg>
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;padding:24px;max-width:760px;width:100%;margin:0 16px;max-height:90vh;overflow-y:auto">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+                <div style="display:flex;align-items:center;gap:12px">
+                    <div style="width:36px;height:36px;background:rgba(249,115,22,0.15);border-radius:8px;display:flex;align-items:center;justify-content:center">
+                        <svg width="20" height="20" fill="none" stroke="#fb923c" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                     </div>
-                    <h3 class="text-xl font-semibold text-white">Exploit Options</h3>
+                    <div>
+                        <h3 style="font-size:17px;font-weight:600;color:#f1f5f9;margin:0">Exploit Intelligence</h3>
+                        <span id="exploit-cve-badge" style="font-size:12px;color:#fb923c;font-family:monospace;background:rgba(249,115,22,0.15);padding:2px 8px;border-radius:4px"></span>
+                    </div>
                 </div>
-                <button onclick="closeExploitModal()" class="text-gray-400 hover:text-white">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-                    </svg>
+                <button onclick="closeExploitModal()" style="color:#94a3b8;background:none;border:none;cursor:pointer;padding:4px">
+                    <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
             </div>
-            <div class="bg-slate-800/50 rounded-lg p-4 mb-5">
-                <div class="mb-3">
-                    <span id="exploit-cve-badge" class="text-sm text-orange-300 font-mono bg-orange-900/30 px-2 py-0.5 rounded"></span>
+
+            <!-- Target inputs -->
+            <div style="background:rgba(30,41,59,0.6);border-radius:8px;padding:14px;margin-bottom:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <div>
+                    <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px">Target IP</label>
+                    <input id="exploit-target-ip" type="text" placeholder="10.0.0.1"
+                           style="width:100%;background:#1e293b;border:1px solid #475569;border-radius:6px;padding:6px 12px;font-size:13px;color:#f1f5f9;font-family:monospace;outline:none;box-sizing:border-box"/>
                 </div>
-                <div class="grid grid-cols-2 gap-3">
-                    <div>
-                        <label class="text-xs text-slate-400 block mb-1">Target IP</label>
-                        <input id="exploit-target-ip" type="text" placeholder="192.168.1.1"
-                               class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm text-white font-mono focus:border-orange-500 focus:outline-none"/>
-                    </div>
-                    <div>
-                        <label class="text-xs text-slate-400 block mb-1">Target Port</label>
-                        <input id="exploit-target-port" type="text" placeholder="443"
-                               class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm text-white font-mono focus:border-orange-500 focus:outline-none"/>
-                    </div>
+                <div>
+                    <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px">Target Port</label>
+                    <input id="exploit-target-port" type="text" placeholder="443"
+                           style="width:100%;background:#1e293b;border:1px solid #475569;border-radius:6px;padding:6px 12px;font-size:13px;color:#f1f5f9;font-family:monospace;outline:none;box-sizing:border-box"/>
                 </div>
             </div>
-            <div id="exploit-loading" class="text-center py-10">
-                <div class="w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
-                <div class="text-slate-400 text-sm">Searching exploit databases...</div>
+
+            <!-- Loading spinner -->
+            <div id="exploit-loading" style="text-align:center;padding:40px 0">
+                <div style="width:32px;height:32px;border:2px solid #f97316;border-top-color:transparent;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 12px"></div>
+                <div style="color:#94a3b8;font-size:13px">Fetching exploit intelligence...</div>
             </div>
-            <div id="exploit-no-results" class="hidden text-center py-10 text-slate-400 text-sm">
-                No exploits found for this vulnerability.
+
+            <!-- NVD CVE info panel -->
+            <div id="exploit-nvd-panel" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px;margin-bottom:16px"></div>
+
+            <!-- Confirmed exploit refs from scan + NVD -->
+            <div id="exploit-refs-section" style="display:none;margin-bottom:16px">
+                <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Known Exploits</div>
+                <div id="exploit-refs-results" style="display:flex;flex-direction:column;gap:8px"></div>
             </div>
-            <div id="exploit-searchsploit-section" class="hidden mb-5">
-                <div class="flex items-center gap-2 mb-3">
-                    <span class="text-sm font-semibold text-slate-200">ExploitDB (searchsploit)</span>
-                    <span class="text-xs px-2 py-0.5 rounded-full bg-blue-900/50 text-blue-300 border border-blue-700/40">local scripts</span>
-                </div>
-                <div id="exploit-searchsploit-results" class="space-y-2"></div>
+
+            <!-- searchsploit local results -->
+            <div id="exploit-searchsploit-section" style="display:none;margin-bottom:16px">
+                <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">searchsploit (local)</div>
+                <div id="exploit-searchsploit-results" style="display:flex;flex-direction:column;gap:8px"></div>
             </div>
-            <div id="exploit-msf-section" class="hidden mb-5">
-                <div class="flex items-center gap-2 mb-3">
-                    <span class="text-sm font-semibold text-slate-200">Metasploit Modules</span>
-                    <span class="text-xs px-2 py-0.5 rounded-full bg-orange-900/50 text-orange-300 border border-orange-700/40">framework</span>
-                </div>
-                <div id="exploit-msf-results" class="space-y-2"></div>
+
+            <!-- Metasploit modules -->
+            <div id="exploit-msf-section" style="display:none;margin-bottom:16px">
+                <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Metasploit Modules</div>
+                <div id="exploit-msf-results" style="display:flex;flex-direction:column;gap:8px"></div>
             </div>
-            <div id="exploit-output-section" class="hidden mt-5">
-                <div class="flex items-center justify-between mb-2">
-                    <span class="text-sm font-semibold text-slate-200">Exploit Output</span>
-                    <span id="exploit-output-status" class="text-xs text-slate-400">Running...</span>
+
+            <!-- CVE reference links -->
+            <div id="exploit-cve-links-section" style="display:none;margin-bottom:16px">
+                <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Search & Reference</div>
+                <div id="exploit-cve-links" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+            </div>
+
+            <!-- Install hint when no tools present -->
+            <div id="exploit-install-hint" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px;margin-bottom:16px">
+                <div style="font-size:13px;font-weight:600;color:#fbbf24;margin-bottom:8px">Install searchsploit for local exploit lookup</div>
+                <div style="font-size:12px;color:#94a3b8;margin-bottom:10px">Run these commands on your Ragnar device to enable offline exploit searching:</div>
+                <code style="display:block;background:#0f172a;border-radius:6px;padding:10px;font-size:11px;color:#86efac;white-space:pre-wrap;font-family:monospace">git clone https://gitlab.com/exploit-database/exploitdb.git /opt/exploitdb
+ln -sf /opt/exploitdb/searchsploit /usr/local/bin/searchsploit
+searchsploit -u</code>
+            </div>
+
+            <!-- No results fallback -->
+            <div id="exploit-no-results" style="display:none;text-align:center;padding:32px 0;color:#64748b;font-size:13px">
+                No exploit data found for this vulnerability.
+            </div>
+
+            <!-- MSF output console -->
+            <div id="exploit-output-section" style="display:none;margin-top:16px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                    <span style="font-size:13px;font-weight:600;color:#e2e8f0">Exploit Output</span>
+                    <span id="exploit-output-status" style="font-size:11px;color:#94a3b8">Running...</span>
                 </div>
                 <div id="exploit-output"
-                     class="bg-black border border-slate-700 rounded-lg p-4 font-mono text-xs text-green-400 h-56 overflow-y-auto whitespace-pre-wrap leading-relaxed"></div>
+                     style="background:#000;border:1px solid #334155;border-radius:8px;padding:14px;font-family:monospace;font-size:11px;color:#4ade80;height:200px;overflow-y:auto;white-space:pre-wrap;line-height:1.5"></div>
             </div>
         </div>
     `;
@@ -13102,10 +13126,17 @@ function openExploitModal(host, port, cve, service, vulnText) {
     document.getElementById('exploit-target-port').value = port;
     document.getElementById('exploit-cve-badge').textContent = cve || service || 'Unknown';
     document.getElementById('exploit-loading').style.display = 'block';
+    document.getElementById('exploit-nvd-panel').style.display = 'none';
+    document.getElementById('exploit-refs-section').style.display = 'none';
     document.getElementById('exploit-searchsploit-section').style.display = 'none';
     document.getElementById('exploit-msf-section').style.display = 'none';
+    document.getElementById('exploit-cve-links-section').style.display = 'none';
+    document.getElementById('exploit-install-hint').style.display = 'none';
     document.getElementById('exploit-no-results').style.display = 'none';
     document.getElementById('exploit-output-section').style.display = 'none';
+    document.getElementById('exploit-refs-results').innerHTML = '';
+    document.getElementById('exploit-searchsploit-results').innerHTML = '';
+    document.getElementById('exploit-msf-results').innerHTML = '';
     document.getElementById('exploit-launcher-modal').style.display = 'flex';
     _loadExploitLookup(cve, service, vulnText || '');
 }
@@ -13114,6 +13145,28 @@ function closeExploitModal() {
     const modal = document.getElementById('exploit-launcher-modal');
     if (modal) modal.style.display = 'none';
     if (_exploitPollTimer) { clearInterval(_exploitPollTimer); _exploitPollTimer = null; }
+}
+
+function _cvssColor(score) {
+    if (!score) return '#94a3b8';
+    if (score >= 9.0) return '#ef4444';
+    if (score >= 7.0) return '#f97316';
+    if (score >= 4.0) return '#eab308';
+    return '#22c55e';
+}
+
+function _exploitRefHtml(r) {
+    const icons = {exploitdb: '⚡', github: '', metasploit: '🔧', packetstorm: '💥', seebug: '🔍', vulners: '🔗'};
+    const icon = icons[r.type] || '🔗';
+    const btnColor = r.type === 'exploitdb' ? '#991b1b' : r.type === 'github' ? '#1d4ed8' : '#334155';
+    return `<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div style="flex:1;min-width:0">
+            <div style="font-size:13px;color:#fca5a5;font-weight:600">${icon} ${r.title}</div>
+            <div style="font-size:11px;color:#64748b;font-family:monospace;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.url}</div>
+        </div>
+        <a href="${r.url}" target="_blank" rel="noopener noreferrer"
+           style="flex-shrink:0;padding:5px 12px;background:${btnColor};color:#fff;border-radius:6px;font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap">Open ↗</a>
+    </div>`;
 }
 
 async function _loadExploitLookup(cve, service, vulnText) {
@@ -13127,93 +13180,109 @@ async function _loadExploitLookup(cve, service, vulnText) {
         document.getElementById('exploit-loading').style.display = 'none';
         let hasResults = false;
 
-        // Show *EXPLOIT* confirmed badge
-        if (data.has_exploit_marker) {
-            const badge = document.createElement('div');
-            badge.style.cssText = 'background:#7f1d1d;border:1px solid #ef4444;border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:8px;';
-            badge.innerHTML = '<span style="font-size:18px">⚡</span><span style="color:#fca5a5;font-weight:700;font-size:13px;">*EXPLOIT* CONFIRMED — nmap found a working exploit for this vulnerability</span>';
-            document.getElementById('exploit-searchsploit-results').parentNode.insertBefore(
-                badge, document.getElementById('exploit-searchsploit-section')
-            );
+        // NVD CVE info panel
+        const nvd = data.nvd_info || {};
+        if (nvd.description || nvd.cvss_score) {
+            hasResults = true;
+            const scoreColor = _cvssColor(nvd.cvss_score);
+            const severityLabel = nvd.cvss_severity || (nvd.cvss_score >= 9 ? 'CRITICAL' : nvd.cvss_score >= 7 ? 'HIGH' : nvd.cvss_score >= 4 ? 'MEDIUM' : 'LOW');
+            let nvdHtml = '';
+            if (data.has_exploit_marker) {
+                nvdHtml += `<div style="background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;padding:8px 12px;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+                    <span style="font-size:16px">⚡</span>
+                    <span style="color:#fca5a5;font-weight:700;font-size:12px">nmap confirmed a working exploit exists for this vulnerability</span>
+                </div>`;
+            }
+            if (nvd.cvss_score) {
+                nvdHtml += `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+                    <span style="font-size:22px;font-weight:700;color:${scoreColor}">${nvd.cvss_score}</span>
+                    <span style="padding:2px 8px;background:${scoreColor}22;color:${scoreColor};border-radius:4px;font-size:11px;font-weight:700">${severityLabel}</span>
+                    ${nvd.cwe ? `<span style="font-size:11px;color:#94a3b8;font-family:monospace">${nvd.cwe}</span>` : ''}
+                    ${nvd.published ? `<span style="font-size:11px;color:#64748b">Published: ${nvd.published}</span>` : ''}
+                </div>`;
+            }
+            if (nvd.description) {
+                nvdHtml += `<div style="font-size:12px;color:#cbd5e1;line-height:1.6">${nvd.description}</div>`;
+            }
+            if (nvd.cvss_vector) {
+                nvdHtml += `<div style="font-size:10px;color:#64748b;font-family:monospace;margin-top:6px">${nvd.cvss_vector}</div>`;
+            }
+            const panel = document.getElementById('exploit-nvd-panel');
+            panel.innerHTML = nvdHtml;
+            panel.style.display = 'block';
+        } else if (data.has_exploit_marker) {
+            hasResults = true;
+            const panel = document.getElementById('exploit-nvd-panel');
+            panel.innerHTML = `<div style="background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;padding:8px 12px;display:flex;align-items:center;gap:8px">
+                <span style="font-size:16px">⚡</span>
+                <span style="color:#fca5a5;font-weight:700;font-size:12px">nmap confirmed a working exploit exists for this vulnerability</span>
+            </div>`;
+            panel.style.display = 'block';
+        } else if (nvd.error) {
+            const panel = document.getElementById('exploit-nvd-panel');
+            panel.innerHTML = `<div style="font-size:12px;color:#64748b">${nvd.error}</div>`;
+            panel.style.display = 'block';
         }
 
-        // Scan-embedded exploit references (URLs, EDB IDs, MSF modules found in scan output)
+        // Known exploit refs (from scan text + NVD references)
         if (data.scan_refs && data.scan_refs.length > 0) {
             hasResults = true;
-            const scanSection = document.getElementById('exploit-searchsploit-section');
-            const scanResults = document.getElementById('exploit-searchsploit-results');
-            scanResults.innerHTML = data.scan_refs.map(r => `
-                <div class="bg-slate-800 rounded-lg p-3 flex items-start justify-between gap-3">
-                    <div class="flex-1 min-w-0">
-                        <div class="text-sm text-red-300 font-medium">⚡ ${r.title}</div>
-                        <div class="text-xs text-slate-400 font-mono mt-1 truncate">${r.url}</div>
-                    </div>
-                    <a href="${r.url}" target="_blank" rel="noopener noreferrer"
-                       style="shrink:0;padding:4px 10px;background:#b91c1c;color:white;border-radius:6px;font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap">
-                        Open Exploit ↗
-                    </a>
-                </div>
-            `).join('');
-            scanSection.style.display = 'block';
+            document.getElementById('exploit-refs-results').innerHTML = data.scan_refs.map(_exploitRefHtml).join('');
+            document.getElementById('exploit-refs-section').style.display = 'block';
         }
 
+        // searchsploit local results
         if (data.searchsploit && data.searchsploit.length > 0) {
             hasResults = true;
-            const existing = document.getElementById('exploit-searchsploit-results').innerHTML;
-            document.getElementById('exploit-searchsploit-results').innerHTML = existing + data.searchsploit.map(e => `
-                <div class="bg-slate-800 rounded-lg p-3 flex items-start justify-between gap-3">
-                    <div class="flex-1 min-w-0">
-                        <div class="text-sm text-white font-medium">${e.title}</div>
-                        <div class="text-xs text-slate-400 font-mono mt-1 truncate">${e.path}</div>
-                        <span class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 mt-1 inline-block">${e.type}</span>
-                        ${e.edb_id ? `<span class="text-xs text-slate-400 ml-1">EDB-${e.edb_id}</span>` : ''}
+            document.getElementById('exploit-searchsploit-results').innerHTML = data.searchsploit.map(e => {
+                const safeTitle = e.title.replace(/'/g, "\\'");
+                const safePath = (e.path || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+                const edbUrl = e.url || (e.edb_id ? `https://www.exploit-db.com/exploits/${e.edb_id}` : '');
+                return `<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;display:flex;align-items:start;justify-content:space-between;gap:10px">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:13px;color:#f1f5f9;font-weight:500">⚡ ${e.title}</div>
+                        <div style="font-size:11px;color:#64748b;font-family:monospace;margin-top:2px">${e.path}</div>
+                        ${e.type ? `<span style="font-size:10px;background:#334155;color:#94a3b8;padding:1px 6px;border-radius:3px;margin-top:4px;display:inline-block">${e.type}</span>` : ''}
                     </div>
-                    <button onclick="copyExploitPath('${e.path.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}') "
-                            class="shrink-0 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded">
-                        Copy Path
-                    </button>
-                </div>
-            `).join('');
+                    <div style="display:flex;gap:6px;flex-shrink:0">
+                        ${edbUrl ? `<a href="${edbUrl}" target="_blank" rel="noopener noreferrer" style="padding:5px 10px;background:#991b1b;color:#fff;border-radius:6px;font-size:11px;font-weight:700;text-decoration:none">View ↗</a>` : ''}
+                        <button onclick="copyExploitPath('${safePath}')" style="padding:5px 10px;background:#334155;color:#e2e8f0;border:none;border-radius:6px;font-size:11px;cursor:pointer">Copy</button>
+                    </div>
+                </div>`;
+            }).join('');
             document.getElementById('exploit-searchsploit-section').style.display = 'block';
         }
 
+        // Metasploit modules
         if (data.metasploit && data.metasploit.length > 0) {
             hasResults = true;
-            const msfAvailable = data.msf_available;
-            document.getElementById('exploit-msf-results').innerHTML = data.metasploit.map(m => `
-                <div class="bg-slate-800 rounded-lg p-3 flex items-start justify-between gap-3">
-                    <div class="flex-1 min-w-0">
-                        <div class="text-sm text-orange-300 font-mono">${m.name}</div>
-                        <div class="text-xs text-slate-400 mt-1">${m.description}</div>
-                        ${m.rank ? `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 mt-1 inline-block">${m.rank}</span>` : ''}
+            document.getElementById('exploit-msf-results').innerHTML = data.metasploit.map(m => {
+                const safeName = m.name.replace(/'/g, "\\'");
+                return `<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;display:flex;align-items:start;justify-content:space-between;gap:10px">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:12px;color:#fb923c;font-family:monospace">${m.name}</div>
+                        <div style="font-size:11px;color:#94a3b8;margin-top:2px">${m.description}</div>
+                        ${m.rank ? `<span style="font-size:10px;background:#334155;color:#94a3b8;padding:1px 6px;border-radius:3px;margin-top:4px;display:inline-block">${m.rank}</span>` : ''}
                     </div>
-                    ${msfAvailable ? `
-                    <button onclick="launchMsfExploit('${m.name.replace(/'/g,"\\'")}') "
-                            class="shrink-0 px-3 py-1.5 text-xs bg-orange-600 hover:bg-orange-500 text-white rounded font-semibold">
-                        Launch
-                    </button>` : ''}
-                </div>
-            `).join('');
+                    ${data.msf_available ? `<button onclick="launchMsfExploit('${safeName}')" style="flex-shrink:0;padding:6px 12px;background:#ea580c;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer">Launch</button>` : ''}
+                </div>`;
+            }).join('');
             document.getElementById('exploit-msf-section').style.display = 'block';
         }
 
-        // Always show CVE reference links
+        // CVE reference links
         if (data.cve_links && data.cve_links.length > 0) {
             hasResults = true;
-            const linksHtml = `
-                <div style="margin-top:12px;padding:12px;background:#1e293b;border-radius:8px">
-                    <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">CVE References &amp; Search</div>
-                    <div style="display:flex;flex-wrap:wrap;gap:8px">
-                        ${data.cve_links.map(l => `
-                            <a href="${l.url}" target="_blank" rel="noopener noreferrer"
-                               style="padding:4px 10px;background:#334155;border-radius:6px;font-size:12px;color:#e2e8f0;text-decoration:none">
-                                ${l.name} ↗
-                            </a>
-                        `).join('')}
-                    </div>
-                </div>`;
-            document.getElementById('exploit-searchsploit-section').style.display = 'block';
-            document.getElementById('exploit-searchsploit-results').innerHTML += linksHtml;
+            document.getElementById('exploit-cve-links').innerHTML = data.cve_links.map(l =>
+                `<a href="${l.url}" target="_blank" rel="noopener noreferrer"
+                    style="padding:5px 12px;background:#1e293b;border:1px solid #334155;border-radius:6px;font-size:12px;color:#e2e8f0;text-decoration:none">${l.name} ↗</a>`
+            ).join('');
+            document.getElementById('exploit-cve-links-section').style.display = 'block';
+        }
+
+        // Show install hint when no local tools and no scan refs found
+        if (!data.searchsploit_available && !data.msf_available && (!data.scan_refs || data.scan_refs.length === 0)) {
+            document.getElementById('exploit-install-hint').style.display = 'block';
         }
 
         if (!hasResults) {

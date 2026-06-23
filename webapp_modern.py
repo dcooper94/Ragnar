@@ -17725,52 +17725,125 @@ def exploit_lookup():
 
     # Parse exploit references already present in the scan text
     scan_refs = []
+    seen_urls: set = set()
 
-    # EDB IDs
+    # EDB IDs in text
     for eid in re.findall(r'EDB-(\d+)', vuln_text, re.IGNORECASE):
-        scan_refs.append({
-            'title': f'ExploitDB EDB-{eid}',
-            'url': f'https://www.exploit-db.com/exploits/{eid}',
-            'confirmed': True,
-        })
+        url = f'https://www.exploit-db.com/exploits/{eid}'
+        if url not in seen_urls:
+            seen_urls.add(url)
+            scan_refs.append({'title': f'ExploitDB #{eid}', 'url': url, 'type': 'exploitdb', 'confirmed': True})
 
     # MSF modules
     for mod in re.findall(r'MSF:([\w/]+)', vuln_text, re.IGNORECASE):
-        scan_refs.append({
-            'title': f'Metasploit: {mod}',
-            'url': f'https://www.rapid7.com/db/search/?q={mod}',
-            'confirmed': True,
-        })
+        url = f'https://www.rapid7.com/db/modules/{mod}'
+        scan_refs.append({'title': f'Metasploit: {mod}', 'url': url, 'type': 'metasploit', 'confirmed': True})
 
-    # All https:// URLs in the vuln text (vulners.com, exploit-db, github, etc.)
+    # All URLs in vuln text — parse by vulners sub-type for useful labels
     for url in re.findall(r'https?://\S+', vuln_text):
         url = url.rstrip('.,;)')
-        if any(x in url for x in ('exploit-db.com', 'github.com', 'vulners.com',
-                                   'rapid7.com', 'packetstormsecurity.com', 'exploit.in')):
-            label = url.split('/')[2]  # domain
-            if 'githubexploit' in url or 'github.com' in url:
-                label = 'GitHub Exploit'
-            elif 'vulners.com' in url:
-                label = 'Vulners'
-            elif 'exploit-db.com' in url:
-                label = 'ExploitDB'
-            elif 'rapid7.com' in url:
-                label = 'Rapid7'
-            elif 'packetstorm' in url:
-                label = 'PacketStorm'
-            scan_refs.append({'title': label, 'url': url, 'confirmed': True})
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        if 'exploit-db.com/exploits/' in url:
+            eid = url.split('/exploits/')[-1].strip('/')
+            scan_refs.append({'title': f'ExploitDB #{eid}', 'url': url, 'type': 'exploitdb', 'confirmed': True})
+        elif 'vulners.com/exploitdb/' in url:
+            raw_id = url.split('/exploitdb/')[-1].strip('/').replace('EDB-', '')
+            direct = f'https://www.exploit-db.com/exploits/{raw_id}'
+            scan_refs.append({'title': f'ExploitDB #{raw_id}', 'url': direct, 'type': 'exploitdb', 'confirmed': True})
+        elif 'vulners.com/githubexploit/' in url:
+            scan_refs.append({'title': 'GitHub PoC (vulners)', 'url': url, 'type': 'github', 'confirmed': True})
+        elif 'vulners.com/packetstorm/' in url or 'packetstormsecurity.com' in url:
+            scan_refs.append({'title': 'PacketStorm Exploit', 'url': url, 'type': 'packetstorm', 'confirmed': True})
+        elif 'vulners.com/seebug/' in url:
+            scan_refs.append({'title': 'SeeBug Exploit', 'url': url, 'type': 'seebug', 'confirmed': True})
+        elif 'vulners.com' in url and '/cve/' not in url.lower():
+            scan_refs.append({'title': 'Vulners Reference', 'url': url, 'type': 'vulners', 'confirmed': True})
+        elif 'rapid7.com' in url:
+            scan_refs.append({'title': 'Rapid7 / Metasploit', 'url': url, 'type': 'metasploit', 'confirmed': True})
+        elif 'github.com' in url:
+            scan_refs.append({'title': 'GitHub Reference', 'url': url, 'type': 'github', 'confirmed': False})
 
-    # Always provide direct CVE database links
+    # NVD API lookup — description, CVSS, and any ExploitDB links NIST tagged
+    nvd_info: dict = {}
+    if cve and re.match(r'^CVE-\d{4}-\d+$', cve):
+        try:
+            import requests as _req
+            nvd_resp = _req.get(
+                f'https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve}',
+                timeout=8,
+                headers={'User-Agent': 'Ragnar-Security-Scanner/1.0'}
+            )
+            if nvd_resp.status_code == 200:
+                nvd_raw = nvd_resp.json()
+                entries = nvd_raw.get('vulnerabilities', [])
+                if entries:
+                    cve_entry = entries[0].get('cve', {})
+
+                    descs = cve_entry.get('descriptions', [])
+                    description = next((d['value'] for d in descs if d.get('lang') == 'en'), '')
+
+                    metrics = cve_entry.get('metrics', {})
+                    cvss_score = cvss_vector = cvss_severity = None
+                    for mk in ['cvssMetricV31', 'cvssMetricV30', 'cvssMetricV2']:
+                        if mk in metrics and metrics[mk]:
+                            m = metrics[mk][0]
+                            cd = m.get('cvssData', {})
+                            cvss_score = cd.get('baseScore')
+                            cvss_vector = cd.get('vectorString', '')
+                            cvss_severity = cd.get('baseSeverity') or m.get('baseSeverity', '')
+                            break
+
+                    weaknesses = cve_entry.get('weaknesses', [])
+                    cwe = None
+                    for w in weaknesses:
+                        for wd in w.get('description', []):
+                            if wd.get('lang') == 'en' and wd.get('value', '').startswith('CWE-'):
+                                cwe = wd['value']
+                                break
+                        if cwe:
+                            break
+
+                    nvd_exploit_refs = []
+                    for ref in cve_entry.get('references', []):
+                        ref_url = ref.get('url', '')
+                        ref_tags = ref.get('tags', [])
+                        if 'exploit-db.com/exploits/' in ref_url:
+                            eid = ref_url.split('/exploits/')[-1].strip('/')
+                            nvd_exploit_refs.append({'title': f'ExploitDB #{eid} (NVD)', 'url': ref_url, 'type': 'exploitdb'})
+                            if ref_url not in seen_urls:
+                                seen_urls.add(ref_url)
+                                scan_refs.append({'title': f'ExploitDB #{eid} (via NVD)', 'url': ref_url, 'type': 'exploitdb', 'confirmed': True})
+                        elif 'Exploit' in ref_tags and 'github.com' in ref_url:
+                            nvd_exploit_refs.append({'title': 'GitHub PoC (NVD)', 'url': ref_url, 'type': 'github'})
+                            if ref_url not in seen_urls:
+                                seen_urls.add(ref_url)
+                                scan_refs.append({'title': 'GitHub PoC (NVD)', 'url': ref_url, 'type': 'github', 'confirmed': True})
+
+                    nvd_info = {
+                        'description': description[:700] if description else '',
+                        'cvss_score': cvss_score,
+                        'cvss_vector': cvss_vector,
+                        'cvss_severity': (cvss_severity or '').upper(),
+                        'cwe': cwe,
+                        'exploit_refs': nvd_exploit_refs,
+                        'published': (cve_entry.get('published') or '')[:10],
+                    }
+        except Exception as nvd_err:
+            logger.debug(f"NVD lookup {cve}: {nvd_err}")
+            nvd_info = {'error': 'NVD lookup unavailable (no internet or rate-limited)'}
+
     cve_links = []
     if cve:
         cve_links = [
             {'name': 'NVD', 'url': f'https://nvd.nist.gov/vuln/detail/{cve}'},
             {'name': 'MITRE', 'url': f'https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve}'},
-            {'name': 'ExploitDB Search', 'url': f'https://www.exploit-db.com/search?cve={cve.replace("CVE-","")}'},
+            {'name': 'ExploitDB', 'url': f'https://www.exploit-db.com/search?cve={cve.replace("CVE-","")}'},
             {'name': 'GitHub PoC', 'url': f'https://github.com/search?q={cve}&type=repositories'},
+            {'name': 'Vulners', 'url': f'https://vulners.com/search?query={cve}'},
         ]
 
-    # Map service names to better searchsploit terms
     _svc_map = {
         'netbios-ssn': 'smb', 'netbios': 'smb', 'microsoft-ds': 'smb',
         'msrpc': 'smb', 'ms-wbt-server': 'rdp', 'rdp': 'rdp',
@@ -17786,6 +17859,7 @@ def exploit_lookup():
         'metasploit': [],
         'scan_refs': scan_refs,
         'cve_links': cve_links,
+        'nvd_info': nvd_info,
         'has_exploit_marker': has_exploit_marker,
         'searchsploit_available': bool(shutil.which('searchsploit')),
         'msf_available': bool(shutil.which('msfconsole')),
@@ -17805,6 +17879,7 @@ def exploit_lookup():
                     'path': e.get('Path', ''),
                     'type': e.get('Type', ''),
                     'edb_id': e.get('EDB-ID', ''),
+                    'url': f"https://www.exploit-db.com/exploits/{e.get('EDB-ID', '')}" if e.get('EDB-ID') else '',
                 }
                 for e in raw.get('RESULTS_EXPLOIT', [])[:12]
             ]
