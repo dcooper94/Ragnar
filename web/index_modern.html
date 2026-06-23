@@ -1416,6 +1416,12 @@
                                 <p id="manual-action-helper" class="text-[11px] text-gray-500 mt-1">Select a port to view compatible attack modules.</p>
                             </div>
                         </div>
+                        <div id="manual-vuln-intel" style="display:none" class="rounded-lg border border-red-800/60 bg-red-950/40 p-3 space-y-2">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="text-red-400 text-xs font-bold uppercase tracking-wide">⚡ Known Vulnerabilities on this Port</span>
+                            </div>
+                            <div id="manual-vuln-intel-list" class="space-y-1"></div>
+                        </div>
                         <button id="manual-attack-launch-btn" onclick="executeManualAttack()" class="w-full bg-orange-600 hover:bg-orange-700 text-white py-3 rounded-lg font-semibold tracking-wide">Execute Attack</button>
                         <p class="text-xs text-gray-500">Actions reuse Ragnar credentials & payloads. Check the attack log in Discovered → Attack Logs for execution details.</p>
                         <div id="manual-attack-status" class="hidden mt-4">

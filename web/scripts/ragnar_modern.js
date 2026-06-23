@@ -9635,13 +9635,41 @@ function updateManualPorts() {
     updateManualActions();
 }
 
+function _getPortVulns(selectedPort) {
+    if (!window.manualTargetsData || !selectedPort) return [];
+    const ipDropdown = document.getElementById('manual-ip-dropdown');
+    const ip = ipDropdown ? ipDropdown.value : '';
+    const target = window.manualTargetsData.find(t => t.ip === ip);
+    return (target && target.vuln_by_port) ? (target.vuln_by_port[selectedPort] || []) : [];
+}
+
+function _updateVulnIntelPanel(portVulns) {
+    const panel = document.getElementById('manual-vuln-intel');
+    const list = document.getElementById('manual-vuln-intel-list');
+    if (!panel || !list) return;
+    if (!portVulns.length) { panel.style.display = 'none'; return; }
+
+    const sevColor = { critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#22c55e' };
+    list.innerHTML = portVulns.map(v => {
+        const sev = (v.severity || 'unknown').toLowerCase();
+        const col = sevColor[sev] || '#94a3b8';
+        const cvss = v.cvss ? ` CVSS ${v.cvss}` : '';
+        return `<div style="display:flex;align-items:start;gap:8px;padding:4px 0;border-bottom:1px solid rgba(239,68,68,0.15)">
+            <span style="flex-shrink:0;font-size:10px;padding:1px 6px;border-radius:3px;background:${col}22;color:${col};font-weight:700;text-transform:uppercase;margin-top:1px">${sev}${cvss}</span>
+            <div style="flex:1;min-width:0">
+                <div style="font-size:12px;color:#fca5a5;font-weight:600;font-family:monospace">${v.cve}</div>
+                ${v.title ? `<div style="font-size:11px;color:#94a3b8;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v.title.replace(/"/g,'&quot;')}">${v.title}</div>` : ''}
+            </div>
+        </div>`;
+    }).join('');
+    panel.style.display = 'block';
+}
+
 function updateManualActions() {
     const portDropdown = document.getElementById('manual-port-dropdown');
     const actionDropdown = document.getElementById('manual-action-dropdown');
 
-    if (!actionDropdown) {
-        return;
-    }
+    if (!actionDropdown) return;
 
     const selectedPort = portDropdown ? portDropdown.value : '';
     const previousSelection = window.manualActionPreference || actionDropdown.value || '';
@@ -9649,29 +9677,47 @@ function updateManualActions() {
     actionDropdown.innerHTML = '<option value="">Select Action</option>';
     actionDropdown.disabled = true;
 
+    const portVulns = _getPortVulns(selectedPort);
+    _updateVulnIntelPanel(portVulns);
+
     if (!selectedPort) {
         setManualActionHelper('Select a port to view compatible attack modules.', 'muted');
         return;
     }
 
-    const validActions = getValidActionsForPort(selectedPort);
+    // CVE exploit options come first — these are specific to what was found on this host
+    portVulns.forEach(v => {
+        if (!v.cve) return;
+        const opt = document.createElement('option');
+        opt.value = `exploit_cve_${v.cve}`;
+        const sev = v.severity ? ` [${v.severity.toUpperCase()}]` : '';
+        const cvss = v.cvss ? ` CVSS ${v.cvss}` : '';
+        opt.textContent = `⚡ Exploit: ${v.cve}${cvss}${sev}`;
+        opt.dataset.isCveExploit = 'true';
+        opt.dataset.cve = v.cve;
+        opt.dataset.vulnText = v.title || '';
+        actionDropdown.appendChild(opt);
+    });
 
-    if (!validActions.length) {
+    // Generic port-based actions (brute force etc.)
+    const validActions = getValidActionsForPort(selectedPort);
+    validActions.forEach(action => {
+        const opt = document.createElement('option');
+        opt.value = action.key;
+        opt.textContent = action.label;
+        actionDropdown.appendChild(opt);
+    });
+
+    const totalOptions = portVulns.length + validActions.length;
+    if (!totalOptions) {
         setManualActionHelper(`No supported attack modules detected for port ${selectedPort}.`, 'warning');
         window.manualActionPreference = '';
         return;
     }
 
-    validActions.forEach(action => {
-        const option = document.createElement('option');
-        option.value = action.key;
-        option.textContent = action.label;
-        actionDropdown.appendChild(option);
-    });
-
     actionDropdown.disabled = false;
 
-    if (previousSelection && validActions.some(action => action.key === previousSelection)) {
+    if (previousSelection && (portVulns.some(v => `exploit_cve_${v.cve}` === previousSelection) || validActions.some(a => a.key === previousSelection))) {
         actionDropdown.value = previousSelection;
     } else {
         actionDropdown.value = '';
@@ -9681,6 +9727,13 @@ function updateManualActions() {
     if (actionDropdown.value) {
         window.manualActionPreference = actionDropdown.value;
         setManualActionHelper(`${actionDropdown.options[actionDropdown.selectedIndex].text} ready for port ${selectedPort}.`, 'success');
+    } else if (portVulns.length > 0) {
+        const critHigh = portVulns.filter(v => ['critical', 'high'].includes((v.severity || '').toLowerCase())).length;
+        if (critHigh > 0) {
+            setManualActionHelper(`⚡ ${critHigh} known exploit${critHigh > 1 ? 's' : ''} available! Select an exploit or brute force method.`, 'error');
+        } else {
+            setManualActionHelper(`Found ${portVulns.length} vuln${portVulns.length > 1 ? 's' : ''} + ${validActions.length} brute-force action${validActions.length !== 1 ? 's' : ''} for port ${selectedPort}.`, 'warning');
+        }
     } else {
         setManualActionHelper(`Found ${validActions.length} compatible ${validActions.length === 1 ? 'action' : 'actions'} on port ${selectedPort}. Choose one to proceed.`, 'success');
     }
@@ -9779,6 +9832,15 @@ async function executeManualAttack() {
         launchBtn.textContent = label || (busy ? 'Launching...' : 'Execute Attack');
     };
     
+    if (action && action.startsWith('exploit_cve_')) {
+        const cve = action.replace('exploit_cve_', '');
+        const actionDropdown = document.getElementById('manual-action-dropdown');
+        const selectedOption = actionDropdown ? actionDropdown.options[actionDropdown.selectedIndex] : null;
+        const vulnText = selectedOption ? (selectedOption.dataset.vulnText || cve) : cve;
+        openExploitModal(ip || '', port || '', cve, '', vulnText);
+        return;
+    }
+
     if (!ip || !port || !action) {
         addConsoleMessage('Please select IP, Port, and Action for manual attack', 'error');
         setManualAttackStatus('Please select a target IP, port, and action before launching.', 'error');

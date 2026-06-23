@@ -13117,12 +13117,32 @@ def _collect_manual_targets():
                         ports = [p.strip() for p in ports_str.split(';') if p.strip()]
                 
                 if ip and ip not in target_ips:
+                    # Load vulnerability data per port from scan_findings
+                    vuln_by_port: dict = {}
+                    try:
+                        with db.get_connection() as _vc:
+                            vrows = _vc.execute(
+                                "SELECT port, title, description, severity, cvss_score "
+                                "FROM scan_findings WHERE host=? AND port IS NOT NULL",
+                                (ip,)
+                            ).fetchall()
+                            for vr in vrows:
+                                pk = str(vr['port'])
+                                vuln_by_port.setdefault(pk, []).append({
+                                    'cve': vr['title'] or '',
+                                    'title': vr['description'] or vr['title'] or '',
+                                    'cvss': vr['cvss_score'],
+                                    'severity': vr['severity'] or 'unknown',
+                                })
+                    except Exception:
+                        pass
                     targets.append({
                         'ip': ip,
                         'hostname': hostname,
                         'ports': ports,
                         'mac': host.get('mac', '00:00:00:00:00:00'),
-                        'source': 'Database'
+                        'source': 'Database',
+                        'vuln_by_port': vuln_by_port,
                     })
                     target_ips.add(ip)
         
