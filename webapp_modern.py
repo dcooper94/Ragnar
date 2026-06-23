@@ -1580,126 +1580,41 @@ def is_orchestrator_running() -> bool:
 
 
 def sync_vulnerability_count():
-    """Synchronize vulnerability count across all data sources and network intelligence"""
+    """Synchronize vulnerability count from scan_findings (single source of truth)."""
     try:
         vuln_count = 0
-        vulnerable_hosts = set()
+        vulnerable_hosts: set = set()
 
-        def record_host(candidate):
-            """Normalize and record a host value for vulnerable host counting"""
-            if candidate is None:
-                return
+        # scan_findings is the canonical store — query it directly
+        try:
+            db = get_db()
+            with db.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt, COUNT(DISTINCT host) as hosts FROM scan_findings"
+                ).fetchone()
+                if row:
+                    vuln_count = row['cnt'] or 0
+                    host_count = row['hosts'] or 0
+                # Collect distinct hosts for vulnerable_host_count
+                for r in conn.execute("SELECT DISTINCT host FROM scan_findings WHERE host IS NOT NULL AND host != ''"):
+                    vulnerable_hosts.add(r['host'])
+        except Exception as db_err:
+            logger.debug(f"scan_findings query failed, falling back to network intelligence: {db_err}")
+            # Fallback: read from network intelligence if DB unavailable
+            if (hasattr(shared_data, 'network_intelligence') and shared_data.network_intelligence):
+                findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
+                vuln_count = findings['counts']['vulnerabilities']
+                for v in findings.get('vulnerabilities', {}).values():
+                    h = v.get('host') or v.get('ip') or ''
+                    if h and h.lower() not in {'unknown', 'none', 'n/a', 'na'}:
+                        vulnerable_hosts.add(h)
 
-            if isinstance(candidate, (list, tuple, set)):
-                for item in candidate:
-                    record_host(item)
-                return
-
-            host_value = str(candidate).strip()
-            if not host_value:
-                return
-
-            lowered = host_value.lower()
-            if lowered in {'unknown', 'none', 'n/a', 'na', 'null'}:
-                return
-
-            vulnerable_hosts.add(host_value)
-
-        # Check if network intelligence is enabled
-        if (hasattr(shared_data, 'network_intelligence') and
-            shared_data.network_intelligence and
-            shared_data.config.get('network_intelligence_enabled', True)):
-
-            # Update network context first
-            shared_data.network_intelligence.update_network_context()
-
-            # Get active findings count for current network
-            dashboard_findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
-            vuln_count = dashboard_findings['counts']['vulnerabilities']
-
-            for vuln_info in dashboard_findings.get('vulnerabilities', {}).values():
-                if isinstance(vuln_info, dict):
-                    record_host(
-                        vuln_info.get('host') or
-                        vuln_info.get('ip') or
-                        vuln_info.get('target') or
-                        vuln_info.get('hostname')
-                    )
-
-            logger.debug(f"Network intelligence vulnerability count: {vuln_count}")
-        else:
-            # Fallback to legacy file-based counting
-            vuln_results_dir = getattr(shared_data, 'vulnerabilities_dir', os.path.join('data', 'output', 'vulnerabilities'))
-            
-            logger.debug(f"Syncing vulnerabilities from directory: {vuln_results_dir}")
-            
-            # Create directory if it doesn't exist
-            try:
-                os.makedirs(vuln_results_dir, exist_ok=True)
-                logger.debug(f"Ensured directory exists: {vuln_results_dir}")
-            except Exception as e:
-                logger.warning(f"Could not create vulnerabilities directory: {e}")
-            
-            if os.path.exists(vuln_results_dir):
-                try:
-                    files_found = []
-                    for filename in os.listdir(vuln_results_dir):
-                        if filename.endswith('.txt') and not filename.startswith('.'):
-                            files_found.append(filename)
-                            filepath = os.path.join(vuln_results_dir, filename)
-                            try:
-                                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                                    content = f.read()
-                                    if content.strip():
-                                        # Count CVEs or files with vulnerability content
-                                        cve_matches = re.findall(r'CVE-\d{4}-\d+', content)
-                                        if cve_matches:
-                                            vuln_count += len(cve_matches)
-                                            logger.debug(f"Found {len(cve_matches)} CVEs in {filename}: {cve_matches}")
-                                        elif len(content.strip()) > 50:  # File has significant content
-                                            vuln_count += 1
-                                            logger.debug(f"Found vulnerability content in {filename} (no CVEs)")
-                            except Exception as e:
-                                logger.debug(f"Could not read vulnerability file {filepath}: {e}")
-                                continue
-
-                    logger.debug(f"Vulnerability files found: {files_found}")
-                    logger.debug(f"Total vulnerability count calculated: {vuln_count}")
-                except Exception as e:
-                    logger.warning(f"Could not list vulnerabilities directory: {e}")
-            else:
-                logger.warning(f"Vulnerabilities directory does not exist: {vuln_results_dir}")
-
-            vuln_summary_file = getattr(shared_data, 'vuln_summary_file',
-                                        os.path.join('data', 'output', 'vulnerabilities', 'vulnerability_summary.csv'))
-
-            if os.path.exists(vuln_summary_file):
-                try:
-                    if pandas_available:
-                        df = pd.read_csv(vuln_summary_file)
-                        if not df.empty:
-                            for _, row in df.iterrows():
-                                vulnerabilities = safe_str(row.get('Vulnerabilities')).strip()
-                                if vulnerabilities and vulnerabilities.lower() not in {'none', 'nan', 'na', '0'}:
-                                    record_host(row.get('IP') or row.get('Hostname'))
-                    else:
-                        with open(vuln_summary_file, 'r', encoding='utf-8', errors='ignore') as summary_file:
-                            reader = csv.DictReader(summary_file)
-                            for row in reader:
-                                vulnerabilities = (row.get('Vulnerabilities') or '').strip()
-                                if vulnerabilities and vulnerabilities.lower() not in {'none', 'nan', 'na', '0'}:
-                                    record_host(row.get('IP') or row.get('Hostname'))
-                except Exception as e:
-                    logger.debug(f"Could not parse vulnerability summary for host count: {e}")
-
-        # Update shared data with synchronized count
         old_count = shared_data.vulnnbr
         shared_data.vulnnbr = vuln_count
-        logger.debug(f"Updated shared_data.vulnnbr: {old_count} -> {vuln_count}")
+        shared_data.vulnerable_host_count = len(vulnerable_hosts)
+        logger.debug(f"vuln count: {old_count} -> {vuln_count} ({len(vulnerable_hosts)} hosts)")
 
-        # ── Pushover: new vulnerability notification ──
-        # Always pass the absolute total; PushoverService tracks its own baseline
-        # (loaded from DB at startup) to avoid re-alerting on restart.
+        # Pushover notification
         try:
             from pushover_service import PushoverService
             _po = getattr(shared_data, '_pushover_service', None)
@@ -1710,14 +1625,8 @@ def sync_vulnerability_count():
         except Exception as _po_err:
             logger.debug(f"Pushover vulnerability notification skipped: {_po_err}")
 
-        old_host_count = getattr(shared_data, 'vulnerable_host_count', 0)
-        shared_data.vulnerable_host_count = len(vulnerable_hosts)
-        logger.debug(f"Updated vulnerable host count: {old_host_count} -> {shared_data.vulnerable_host_count}")
-
-        # SQLite is the primary source of truth - CSV livestatus file is deprecated
-        logger.debug(f"Synchronized vulnerability count: {vuln_count}")
         return vuln_count
-        
+
     except Exception as e:
         logger.error(f"Error synchronizing vulnerability count: {e}")
         return safe_int(shared_data.vulnnbr)
