@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 PORT = 8001
 
-HTML = b"""<!DOCTYPE html>
+HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -143,9 +143,10 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", len(HTML))
+            body = HTML.encode("utf-8")
+            self.send_header("Content-Length", len(body))
             self.end_headers()
-            self.wfile.write(HTML)
+            self.wfile.write(body)
 
     def do_POST(self):
         path = urlparse(self.path).path
