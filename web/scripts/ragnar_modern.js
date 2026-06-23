@@ -13009,7 +13009,15 @@ function exploitVulnFromModal(vuln) {
     const cveMatch = (vuln.vulnerability || '').match(/CVE-\d{4}-\d+/i);
     const cve = cveMatch ? cveMatch[0].toUpperCase() : '';
     const port = (vuln.port || '').toString().replace(/\/tcp|\/udp/i, '');
-    openExploitModal(vuln.host || '', port, cve, vuln.service || '', vuln.vulnerability || '');
+    const svcMap = {
+        'netbios-ssn':'smb','netbios':'smb','microsoft-ds':'smb','msrpc':'smb',
+        'ms-wbt-server':'rdp','ssh':'ssh','ftp':'ftp','smtp':'smtp',
+        'http':'apache','https':'ssl','telnet':'telnet','vnc':'vnc',
+        'mysql':'mysql','ms-sql-s':'mssql','oracle':'oracle','postgresql':'postgresql',
+    };
+    const svc = (vuln.service || '').toLowerCase();
+    const service = svcMap[svc] || vuln.service || '';
+    openExploitModal(vuln.host || '', port, cve, service, vuln.vulnerability || '');
 }
 
 let _exploitPollTimer = null;
@@ -13119,7 +13127,17 @@ async function _loadExploitLookup(cve, service, vulnText) {
         document.getElementById('exploit-loading').style.display = 'none';
         let hasResults = false;
 
-        // Scan-embedded exploit references (EDB IDs, MSF modules in raw scan output)
+        // Show *EXPLOIT* confirmed badge
+        if (data.has_exploit_marker) {
+            const badge = document.createElement('div');
+            badge.style.cssText = 'background:#7f1d1d;border:1px solid #ef4444;border-radius:8px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:8px;';
+            badge.innerHTML = '<span style="font-size:18px">⚡</span><span style="color:#fca5a5;font-weight:700;font-size:13px;">*EXPLOIT* CONFIRMED — nmap found a working exploit for this vulnerability</span>';
+            document.getElementById('exploit-searchsploit-results').parentNode.insertBefore(
+                badge, document.getElementById('exploit-searchsploit-section')
+            );
+        }
+
+        // Scan-embedded exploit references (URLs, EDB IDs, MSF modules found in scan output)
         if (data.scan_refs && data.scan_refs.length > 0) {
             hasResults = true;
             const scanSection = document.getElementById('exploit-searchsploit-section');
@@ -13127,14 +13145,15 @@ async function _loadExploitLookup(cve, service, vulnText) {
             scanResults.innerHTML = data.scan_refs.map(r => `
                 <div class="bg-slate-800 rounded-lg p-3 flex items-start justify-between gap-3">
                     <div class="flex-1 min-w-0">
-                        <div class="text-sm text-white font-medium">${r.title}</div>
+                        <div class="text-sm text-red-300 font-medium">⚡ ${r.title}</div>
+                        <div class="text-xs text-slate-400 font-mono mt-1 truncate">${r.url}</div>
                     </div>
                     <a href="${r.url}" target="_blank" rel="noopener noreferrer"
-                       class="shrink-0 px-2 py-1 text-xs bg-blue-700 hover:bg-blue-600 text-white rounded">
-                        Open
+                       style="shrink:0;padding:4px 10px;background:#b91c1c;color:white;border-radius:6px;font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap">
+                        Open Exploit ↗
                     </a>
                 </div>
-            `).join('') + (scanResults.innerHTML || '');
+            `).join('');
             scanSection.style.display = 'block';
         }
 

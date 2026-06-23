@@ -17799,22 +17799,44 @@ def exploit_lookup():
     if not cve and not service:
         return jsonify({'error': 'cve or service required'}), 400
 
+    has_exploit_marker = '*EXPLOIT*' in vuln_text.upper()
+
     # Parse exploit references already present in the scan text
     scan_refs = []
-    edb_ids = re.findall(r'EDB-(\d+)', vuln_text, re.IGNORECASE)
-    for eid in edb_ids:
+
+    # EDB IDs
+    for eid in re.findall(r'EDB-(\d+)', vuln_text, re.IGNORECASE):
         scan_refs.append({
-            'title': f'ExploitDB EDB-{eid} (found in scan)',
+            'title': f'ExploitDB EDB-{eid}',
             'url': f'https://www.exploit-db.com/exploits/{eid}',
-            'edb_id': eid,
+            'confirmed': True,
         })
-    msf_mods = re.findall(r'MSF:([\w/]+)', vuln_text, re.IGNORECASE)
-    for mod in msf_mods:
+
+    # MSF modules
+    for mod in re.findall(r'MSF:([\w/]+)', vuln_text, re.IGNORECASE):
         scan_refs.append({
-            'title': f'Metasploit module: {mod} (found in scan)',
+            'title': f'Metasploit: {mod}',
             'url': f'https://www.rapid7.com/db/search/?q={mod}',
-            'msf_module': mod,
+            'confirmed': True,
         })
+
+    # All https:// URLs in the vuln text (vulners.com, exploit-db, github, etc.)
+    for url in re.findall(r'https?://\S+', vuln_text):
+        url = url.rstrip('.,;)')
+        if any(x in url for x in ('exploit-db.com', 'github.com', 'vulners.com',
+                                   'rapid7.com', 'packetstormsecurity.com', 'exploit.in')):
+            label = url.split('/')[2]  # domain
+            if 'githubexploit' in url or 'github.com' in url:
+                label = 'GitHub Exploit'
+            elif 'vulners.com' in url:
+                label = 'Vulners'
+            elif 'exploit-db.com' in url:
+                label = 'ExploitDB'
+            elif 'rapid7.com' in url:
+                label = 'Rapid7'
+            elif 'packetstorm' in url:
+                label = 'PacketStorm'
+            scan_refs.append({'title': label, 'url': url, 'confirmed': True})
 
     # Always provide direct CVE database links
     cve_links = []
@@ -17826,18 +17848,30 @@ def exploit_lookup():
             {'name': 'GitHub PoC', 'url': f'https://github.com/search?q={cve}&type=repositories'},
         ]
 
+    # Map service names to better searchsploit terms
+    _svc_map = {
+        'netbios-ssn': 'smb', 'netbios': 'smb', 'microsoft-ds': 'smb',
+        'msrpc': 'smb', 'ms-wbt-server': 'rdp', 'rdp': 'rdp',
+        'ssh': 'ssh', 'ftp': 'ftp', 'smtp': 'smtp', 'imap': 'imap',
+        'pop3': 'pop3', 'http': 'apache', 'https': 'ssl',
+        'telnet': 'telnet', 'vnc': 'vnc', 'mysql': 'mysql',
+        'ms-sql-s': 'mssql', 'oracle': 'oracle', 'postgresql': 'postgresql',
+    }
+    search_service = _svc_map.get(service.lower(), service)
+
     result = {
         'searchsploit': [],
         'metasploit': [],
         'scan_refs': scan_refs,
         'cve_links': cve_links,
+        'has_exploit_marker': has_exploit_marker,
         'searchsploit_available': bool(shutil.which('searchsploit')),
         'msf_available': bool(shutil.which('msfconsole')),
     }
 
     if result['searchsploit_available']:
         try:
-            search_term = cve if cve else service
+            search_term = cve if cve else search_service
             r = subprocess.run(
                 ['searchsploit', '--json', search_term],
                 capture_output=True, text=True, timeout=30
