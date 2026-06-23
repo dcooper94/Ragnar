@@ -13017,7 +13017,7 @@ let _exploitPollTimer = null;
 function _injectExploitModal() {
     const modal = document.createElement('div');
     modal.id = 'exploit-launcher-modal';
-    modal.className = 'fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-[60]';
+    modal.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.82);align-items:center;justify-content:center;z-index:9999;';
     modal.innerHTML = `
         <div class="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-3xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <div class="flex items-center justify-between mb-5">
@@ -13093,20 +13093,18 @@ function openExploitModal(host, port, cve, service) {
     document.getElementById('exploit-target-ip').value = host;
     document.getElementById('exploit-target-port').value = port;
     document.getElementById('exploit-cve-badge').textContent = cve || service || 'Unknown';
-    document.getElementById('exploit-loading').classList.remove('hidden');
-    document.getElementById('exploit-searchsploit-section').classList.add('hidden');
-    document.getElementById('exploit-msf-section').classList.add('hidden');
-    document.getElementById('exploit-no-results').classList.add('hidden');
-    document.getElementById('exploit-output-section').classList.add('hidden');
-    const modal = document.getElementById('exploit-launcher-modal');
-    modal.classList.remove('hidden');
-    modal.classList.add('flex');
+    document.getElementById('exploit-loading').style.display = 'block';
+    document.getElementById('exploit-searchsploit-section').style.display = 'none';
+    document.getElementById('exploit-msf-section').style.display = 'none';
+    document.getElementById('exploit-no-results').style.display = 'none';
+    document.getElementById('exploit-output-section').style.display = 'none';
+    document.getElementById('exploit-launcher-modal').style.display = 'flex';
     _loadExploitLookup(cve, service);
 }
 
 function closeExploitModal() {
     const modal = document.getElementById('exploit-launcher-modal');
-    if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
+    if (modal) modal.style.display = 'none';
     if (_exploitPollTimer) { clearInterval(_exploitPollTimer); _exploitPollTimer = null; }
 }
 
@@ -13118,7 +13116,7 @@ async function _loadExploitLookup(cve, service) {
             body: JSON.stringify({cve, service})
         });
         const data = await resp.json();
-        document.getElementById('exploit-loading').classList.add('hidden');
+        document.getElementById('exploit-loading').style.display = 'none';
         let hasResults = false;
 
         if (data.searchsploit && data.searchsploit.length > 0) {
@@ -13137,7 +13135,7 @@ async function _loadExploitLookup(cve, service) {
                     </button>
                 </div>
             `).join('');
-            document.getElementById('exploit-searchsploit-section').classList.remove('hidden');
+            document.getElementById('exploit-searchsploit-section').style.display = 'block';
         }
 
         if (data.metasploit && data.metasploit.length > 0) {
@@ -13157,17 +13155,17 @@ async function _loadExploitLookup(cve, service) {
                     </button>` : ''}
                 </div>
             `).join('');
-            document.getElementById('exploit-msf-section').classList.remove('hidden');
+            document.getElementById('exploit-msf-section').style.display = 'block';
         }
 
         if (!hasResults) {
-            document.getElementById('exploit-no-results').classList.remove('hidden');
+            document.getElementById('exploit-no-results').style.display = 'block';
         }
     } catch (e) {
-        document.getElementById('exploit-loading').classList.add('hidden');
+        document.getElementById('exploit-loading').style.display = 'none';
         const noRes = document.getElementById('exploit-no-results');
         noRes.textContent = 'Error loading exploit data: ' + e.message;
-        noRes.classList.remove('hidden');
+        noRes.style.display = 'block';
     }
 }
 
@@ -13189,7 +13187,7 @@ async function launchMsfExploit(module) {
         const outputSection = document.getElementById('exploit-output-section');
         const outputEl = document.getElementById('exploit-output');
         const statusEl = document.getElementById('exploit-output-status');
-        outputSection.classList.remove('hidden');
+        outputSection.style.display = 'block';
         outputEl.textContent = 'Starting msfconsole...\n';
         statusEl.textContent = 'Running...';
         statusEl.className = 'text-xs text-yellow-400';
