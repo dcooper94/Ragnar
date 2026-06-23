@@ -530,6 +530,7 @@ class SharedData:
         self.vncfile = os.path.join(self.crackedpwddir, "vnc.csv")
         self.redisfile = os.path.join(self.crackedpwddir, "redis.csv")
         self.postgresfile = os.path.join(self.crackedpwddir, "postgres.csv")
+        self.wififile = os.path.join(self.crackedpwddir, "wifi.csv")
 
     def set_active_network(self, ssid):
         """Public entry point for Wi-Fi manager to switch all storage."""
@@ -740,6 +741,14 @@ class SharedData:
             "pwnagotchi_manual_mode": False,
             "pwnagotchi_last_switch": "",
             "pwnagotchi_last_status": "Not installed",
+            "pwnagotchi_peer_enabled": False,
+            "pwnagotchi_peer_ip": "",
+            "pwnagotchi_peer_ssh_user": "root",
+            "pwnagotchi_peer_ssh_password": "",
+            "pwnagotchi_peer_ssh_key": "",
+            "pwnagotchi_peer_handshake_dir": "/root/handshakes",
+            "pwnagotchi_peer_last_sync": "",
+            "pwnagotchi_peer_cracked_total": 0,
 
             "__title_wardriving__": "Wardriving",
             "wardriving_enabled": False,

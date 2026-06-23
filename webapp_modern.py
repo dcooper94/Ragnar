@@ -8921,6 +8921,73 @@ def save_pwnagotchi_config():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/pwnagotchi/peer-sync', methods=['POST'])
+def pwnagotchi_peer_sync():
+    """Manually trigger a handshake sync from a configured Pwnagotchi peer."""
+    try:
+        from actions.pwnagotchi_sync import _Syncer
+        import csv as _csv
+
+        cfg = shared_data.config
+        if not cfg.get('pwnagotchi_peer_enabled', False):
+            return jsonify({'success': False, 'error': 'Peer sync is not enabled'}), 400
+
+        peer_ip = cfg.get('pwnagotchi_peer_ip', '').strip()
+        if not peer_ip:
+            return jsonify({'success': False, 'error': 'No peer IP configured'}), 400
+
+        syncer = _Syncer(shared_data)
+        syncer.run()
+
+        # Count cracked entries
+        cracked_count = 0
+        if os.path.exists(shared_data.wififile):
+            with open(shared_data.wififile, newline='') as f:
+                cracked_count = sum(1 for _ in _csv.DictReader(f))
+
+        shared_data.config['pwnagotchi_peer_last_sync'] = datetime.now().isoformat()
+        shared_data.config['pwnagotchi_peer_cracked_total'] = cracked_count
+        shared_data.save_config()
+
+        return jsonify({
+            'success': True,
+            'cracked_total': cracked_count,
+            'last_sync': shared_data.config['pwnagotchi_peer_last_sync'],
+        })
+    except Exception as exc:
+        logger.error(f'Pwnagotchi peer sync error: {exc}')
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/pwnagotchi/peer-status')
+def pwnagotchi_peer_status():
+    """Return current peer sync status and cracked WiFi credential count."""
+    cfg = shared_data.config
+    cracked_count = 0
+    if os.path.exists(getattr(shared_data, 'wififile', '')):
+        try:
+            import csv as _csv
+            with open(shared_data.wififile, newline='') as f:
+                cracked_count = sum(1 for _ in _csv.DictReader(f))
+        except Exception:
+            pass
+
+    # Count handshake files in the local dir
+    import glob as _glob
+    handshake_count = len([
+        p for p in _glob.glob('/root/handshakes/*')
+        if any(p.lower().endswith(ext) for ext in ('.pcap', '.pcapng', '.22000', '.hc22000'))
+    ])
+
+    return jsonify({
+        'enabled': cfg.get('pwnagotchi_peer_enabled', False),
+        'peer_ip': cfg.get('pwnagotchi_peer_ip', ''),
+        'last_sync': cfg.get('pwnagotchi_peer_last_sync', ''),
+        'cracked_total': cracked_count,
+        'handshake_count': handshake_count,
+    })
+
+
 def _set_toml_value(doc, dotted_key, value):
     """Set a nested value in a tomlkit document using dotted key notation."""
     import tomlkit

@@ -3999,6 +3999,9 @@ async function loadConfigData() {
         // Load AI configuration
         loadAIConfiguration(config);
 
+        // Load Pwnagotchi peer sync configuration
+        loadPeerSyncConfig(config);
+
         // Load Pushover configuration
         loadPushoverConfiguration(config);
 
@@ -11339,6 +11342,86 @@ async function saveConfig(form) {
     } catch (error) {
         console.error('Config save error:', error);
         addConsoleMessage('Failed to save configuration', 'error');
+    }
+}
+
+// ===================================================================
+//  Pwnagotchi Peer Sync
+// ===================================================================
+
+async function loadPeerSyncConfig(config) {
+    if (!config) return;
+    const el = (id) => document.getElementById(id);
+
+    if (el('peer-sync-enabled'))    el('peer-sync-enabled').checked  = !!config.pwnagotchi_peer_enabled;
+    if (el('peer-sync-ip'))         el('peer-sync-ip').value          = config.pwnagotchi_peer_ip || '';
+    if (el('peer-sync-user'))       el('peer-sync-user').value        = config.pwnagotchi_peer_ssh_user || 'root';
+    if (el('peer-sync-password'))   el('peer-sync-password').value    = config.pwnagotchi_peer_ssh_password || '';
+    if (el('peer-sync-key'))        el('peer-sync-key').value         = config.pwnagotchi_peer_ssh_key || '';
+    if (el('peer-sync-dir'))        el('peer-sync-dir').value         = config.pwnagotchi_peer_handshake_dir || '/root/handshakes';
+
+    await refreshPeerSyncStatus();
+}
+
+async function refreshPeerSyncStatus() {
+    try {
+        const data = await fetchAPI('/api/pwnagotchi/peer-status');
+        const el = (id) => document.getElementById(id);
+
+        if (data.last_sync && el('peer-sync-last')) {
+            el('peer-sync-last').classList.remove('hidden');
+            const d = new Date(data.last_sync);
+            el('peer-sync-last-time').textContent = isNaN(d) ? data.last_sync : d.toLocaleString();
+        }
+        if (el('peer-sync-handshake-count')) el('peer-sync-handshake-count').textContent = data.handshake_count || 0;
+        if (el('peer-sync-cracked-count'))   el('peer-sync-cracked-count').textContent   = data.cracked_total  || 0;
+
+        const badge = el('peer-cracked-badge');
+        if (badge && data.cracked_total > 0) {
+            badge.textContent = `${data.cracked_total} cracked`;
+            badge.classList.remove('hidden');
+        }
+    } catch (_) {}
+}
+
+async function savePeerSyncConfig() {
+    const el = (id) => document.getElementById(id);
+    const payload = {
+        pwnagotchi_peer_enabled:        el('peer-sync-enabled')  ? el('peer-sync-enabled').checked        : false,
+        pwnagotchi_peer_ip:             el('peer-sync-ip')?.value.trim()       || '',
+        pwnagotchi_peer_ssh_user:       el('peer-sync-user')?.value.trim()     || 'root',
+        pwnagotchi_peer_ssh_password:   el('peer-sync-password')?.value        || '',
+        pwnagotchi_peer_ssh_key:        el('peer-sync-key')?.value.trim()      || '',
+        pwnagotchi_peer_handshake_dir:  el('peer-sync-dir')?.value.trim()      || '/root/handshakes',
+    };
+
+    const statusEl = el('peer-sync-save-status');
+    try {
+        await fetchAPI('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (statusEl) { statusEl.textContent = 'Saved'; statusEl.classList.remove('hidden'); setTimeout(() => statusEl.classList.add('hidden'), 3000); }
+    } catch (e) {
+        if (statusEl) { statusEl.textContent = 'Save failed'; statusEl.classList.remove('hidden'); }
+    }
+}
+
+async function pwnPeerSyncNow() {
+    const btn = document.getElementById('peer-sync-btn');
+    const origText = btn?.textContent || 'Sync Now';
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+
+    try {
+        const result = await fetchAPI('/api/pwnagotchi/peer-sync', { method: 'POST' });
+        if (result.success) {
+            const cracked = result.cracked_total || 0;
+            showNotification(`Sync complete — ${cracked} WiFi password${cracked !== 1 ? 's' : ''} cracked`, 'success');
+            await refreshPeerSyncStatus();
+        } else {
+            showNotification(`Sync failed: ${result.error || 'unknown error'}`, 'error');
+        }
+    } catch (e) {
+        showNotification(`Sync error: ${e.message}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = origText; }
     }
 }
 

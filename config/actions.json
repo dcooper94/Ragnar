@@ -194,5 +194,12 @@
         "b_port": 5432,
         "b_status": "steal_data_postgres",
         "b_parent": "PostgresBruteforce"
+    },
+    {
+        "b_module": "pwnagotchi_sync",
+        "b_class": "PwnagotchiSync",
+        "b_port": null,
+        "b_status": "pwnagotchi_sync",
+        "b_parent": null
     }
 ]
