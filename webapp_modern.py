@@ -14,6 +14,7 @@ import sys
 import json
 import csv
 import glob
+import uuid
 import signal
 import logging
 import threading
@@ -17742,6 +17743,156 @@ def airsnitch_install_log():
     except Exception as exc:
         logger.error(f"airsnitch_install_log error: {exc}")
         return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+# ============================================================================
+# EXPLOIT LAUNCHER API
+# ============================================================================
+
+_exploit_jobs: dict = {}
+_exploit_jobs_lock = threading.Lock()
+
+
+def _run_msf_exploit_bg(job_id: str, module: str, target_ip: str, target_port: str, extra_options: dict):
+    import tempfile
+    try:
+        rc_lines = [f"use {module}", f"set RHOSTS {target_ip}"]
+        if target_port:
+            rc_lines.append(f"set RPORT {target_port}")
+        for k, v in (extra_options or {}).items():
+            rc_lines.append(f"set {k} {v}")
+        rc_lines += ["run", "exit -y"]
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.rc', delete=False, dir='/tmp') as f:
+            f.write('\n'.join(rc_lines) + '\n')
+            rc_path = f.name
+
+        proc = subprocess.Popen(
+            ['msfconsole', '-q', '-r', rc_path],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1
+        )
+        output_lines: list = []
+        for line in proc.stdout:
+            output_lines.append(line)
+            with _exploit_jobs_lock:
+                _exploit_jobs[job_id]['output'] = ''.join(output_lines[-300:])
+        proc.wait(timeout=300)
+        try:
+            os.unlink(rc_path)
+        except Exception:
+            pass
+        with _exploit_jobs_lock:
+            _exploit_jobs[job_id].update({'done': True, 'exit_code': proc.returncode})
+    except Exception as exc:
+        with _exploit_jobs_lock:
+            _exploit_jobs[job_id].update({'done': True, 'error': str(exc)})
+
+
+@app.route('/api/exploit/lookup', methods=['POST'])
+def exploit_lookup():
+    data = request.get_json() or {}
+    cve = re.sub(r'\s+', '', (data.get('cve') or '')).upper()
+    service = (data.get('service') or '').strip()
+
+    if not cve and not service:
+        return jsonify({'error': 'cve or service required'}), 400
+
+    result = {
+        'searchsploit': [],
+        'metasploit': [],
+        'searchsploit_available': bool(shutil.which('searchsploit')),
+        'msf_available': bool(shutil.which('msfconsole')),
+    }
+
+    if result['searchsploit_available']:
+        try:
+            if cve:
+                cve_num = re.sub(r'^CVE-', '', cve)
+                r = subprocess.run(
+                    ['searchsploit', '--cve', cve_num, '--json'],
+                    capture_output=True, text=True, timeout=30
+                )
+            else:
+                r = subprocess.run(
+                    ['searchsploit', '--json', service],
+                    capture_output=True, text=True, timeout=30
+                )
+            raw = json.loads(r.stdout)
+            result['searchsploit'] = [
+                {
+                    'title': e.get('Title', ''),
+                    'path': e.get('Path', ''),
+                    'type': e.get('Type', ''),
+                    'edb_id': e.get('EDB-ID', ''),
+                }
+                for e in raw.get('RESULTS_EXPLOIT', [])[:12]
+            ]
+        except Exception as exc:
+            result['searchsploit_error'] = str(exc)
+
+    if result['msf_available']:
+        try:
+            search_term = f"cve:{cve.replace('CVE-', '')}" if cve else service
+            r = subprocess.run(
+                ['msfconsole', '-q', '-x', f'search {search_term}; exit'],
+                capture_output=True, text=True, timeout=90
+            )
+            modules = []
+            for line in r.stdout.split('\n'):
+                stripped = line.strip()
+                if re.match(r'^\d+\s+\S+/\S+', stripped):
+                    parts = stripped.split()
+                    if len(parts) >= 2:
+                        modules.append({
+                            'name': parts[1],
+                            'rank': parts[3] if len(parts) > 3 else '',
+                            'description': ' '.join(parts[5:]) if len(parts) > 5 else '',
+                        })
+            result['metasploit'] = modules[:10]
+        except Exception as exc:
+            result['msf_error'] = str(exc)
+
+    return jsonify(result)
+
+
+@app.route('/api/exploit/run', methods=['POST'])
+def exploit_run():
+    data = request.get_json() or {}
+    module = (data.get('module') or '').strip()
+    target_ip = (data.get('target_ip') or '').strip()
+    target_port = (data.get('target_port') or '').strip()
+    extra_options = data.get('options') or {}
+
+    if not module or not target_ip:
+        return jsonify({'success': False, 'error': 'module and target_ip required'}), 400
+
+    if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', target_ip):
+        return jsonify({'success': False, 'error': 'Invalid target IP address'}), 400
+
+    if not shutil.which('msfconsole'):
+        return jsonify({'success': False, 'error': 'msfconsole is not installed on this system'}), 503
+
+    job_id = str(uuid.uuid4())[:8]
+    with _exploit_jobs_lock:
+        _exploit_jobs[job_id] = {'output': 'Starting msfconsole...\n', 'done': False}
+
+    threading.Thread(
+        target=_run_msf_exploit_bg,
+        args=(job_id, module, target_ip, target_port, extra_options),
+        daemon=True
+    ).start()
+
+    return jsonify({'success': True, 'job_id': job_id})
+
+
+@app.route('/api/exploit/output/<job_id>', methods=['GET'])
+def exploit_output(job_id):
+    with _exploit_jobs_lock:
+        job = dict(_exploit_jobs.get(job_id) or {})
+    if not job:
+        return jsonify({'error': 'unknown job'}), 404
+    return jsonify(job)
 
 
 # ============================================================================

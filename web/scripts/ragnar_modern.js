@@ -12998,11 +12998,224 @@ function researchVulnerability(cveOrId) {
 }
 
 function exploitVulnerability(entry) {
-    const confirmMsg = `Are you sure you want to attempt exploitation of ${entry.cve || entry.description} on ${entry.host}?`;
-    if (confirm(confirmMsg)) {
-        showNetkbInfo('Exploitation feature not yet implemented - this would trigger automated exploit attempts');
-        // TODO: Implement actual exploitation logic
+    const cve = entry.cve || '';
+    const host = entry.host || '';
+    const port = (entry.port || '').toString().replace(/\/tcp|\/udp/i, '');
+    const service = entry.service || '';
+    openExploitModal(host, port, cve, service);
+}
+
+function exploitVulnFromModal(vuln) {
+    const cveMatch = (vuln.vulnerability || '').match(/CVE-\d{4}-\d+/i);
+    const cve = cveMatch ? cveMatch[0].toUpperCase() : '';
+    const port = (vuln.port || '').toString().replace(/\/tcp|\/udp/i, '');
+    openExploitModal(vuln.host || '', port, cve, vuln.service || '');
+}
+
+let _exploitPollTimer = null;
+
+function _injectExploitModal() {
+    const modal = document.createElement('div');
+    modal.id = 'exploit-launcher-modal';
+    modal.className = 'fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-[60]';
+    modal.innerHTML = `
+        <div class="bg-slate-900 border border-slate-700 rounded-xl p-6 max-w-3xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between mb-5">
+                <div class="flex items-center gap-3">
+                    <div class="w-9 h-9 bg-orange-500/20 rounded-lg flex items-center justify-center">
+                        <svg class="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                        </svg>
+                    </div>
+                    <h3 class="text-xl font-semibold text-white">Exploit Options</h3>
+                </div>
+                <button onclick="closeExploitModal()" class="text-gray-400 hover:text-white">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="bg-slate-800/50 rounded-lg p-4 mb-5">
+                <div class="mb-3">
+                    <span id="exploit-cve-badge" class="text-sm text-orange-300 font-mono bg-orange-900/30 px-2 py-0.5 rounded"></span>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-xs text-slate-400 block mb-1">Target IP</label>
+                        <input id="exploit-target-ip" type="text" placeholder="192.168.1.1"
+                               class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm text-white font-mono focus:border-orange-500 focus:outline-none"/>
+                    </div>
+                    <div>
+                        <label class="text-xs text-slate-400 block mb-1">Target Port</label>
+                        <input id="exploit-target-port" type="text" placeholder="443"
+                               class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm text-white font-mono focus:border-orange-500 focus:outline-none"/>
+                    </div>
+                </div>
+            </div>
+            <div id="exploit-loading" class="text-center py-10">
+                <div class="w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
+                <div class="text-slate-400 text-sm">Searching exploit databases...</div>
+            </div>
+            <div id="exploit-no-results" class="hidden text-center py-10 text-slate-400 text-sm">
+                No exploits found for this vulnerability.
+            </div>
+            <div id="exploit-searchsploit-section" class="hidden mb-5">
+                <div class="flex items-center gap-2 mb-3">
+                    <span class="text-sm font-semibold text-slate-200">ExploitDB (searchsploit)</span>
+                    <span class="text-xs px-2 py-0.5 rounded-full bg-blue-900/50 text-blue-300 border border-blue-700/40">local scripts</span>
+                </div>
+                <div id="exploit-searchsploit-results" class="space-y-2"></div>
+            </div>
+            <div id="exploit-msf-section" class="hidden mb-5">
+                <div class="flex items-center gap-2 mb-3">
+                    <span class="text-sm font-semibold text-slate-200">Metasploit Modules</span>
+                    <span class="text-xs px-2 py-0.5 rounded-full bg-orange-900/50 text-orange-300 border border-orange-700/40">framework</span>
+                </div>
+                <div id="exploit-msf-results" class="space-y-2"></div>
+            </div>
+            <div id="exploit-output-section" class="hidden mt-5">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-semibold text-slate-200">Exploit Output</span>
+                    <span id="exploit-output-status" class="text-xs text-slate-400">Running...</span>
+                </div>
+                <div id="exploit-output"
+                     class="bg-black border border-slate-700 rounded-lg p-4 font-mono text-xs text-green-400 h-56 overflow-y-auto whitespace-pre-wrap leading-relaxed"></div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+function openExploitModal(host, port, cve, service) {
+    if (!document.getElementById('exploit-launcher-modal')) {
+        _injectExploitModal();
     }
+    document.getElementById('exploit-target-ip').value = host;
+    document.getElementById('exploit-target-port').value = port;
+    document.getElementById('exploit-cve-badge').textContent = cve || service || 'Unknown';
+    document.getElementById('exploit-loading').classList.remove('hidden');
+    document.getElementById('exploit-searchsploit-section').classList.add('hidden');
+    document.getElementById('exploit-msf-section').classList.add('hidden');
+    document.getElementById('exploit-no-results').classList.add('hidden');
+    document.getElementById('exploit-output-section').classList.add('hidden');
+    const modal = document.getElementById('exploit-launcher-modal');
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    _loadExploitLookup(cve, service);
+}
+
+function closeExploitModal() {
+    const modal = document.getElementById('exploit-launcher-modal');
+    if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
+    if (_exploitPollTimer) { clearInterval(_exploitPollTimer); _exploitPollTimer = null; }
+}
+
+async function _loadExploitLookup(cve, service) {
+    try {
+        const resp = await fetch('/api/exploit/lookup', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({cve, service})
+        });
+        const data = await resp.json();
+        document.getElementById('exploit-loading').classList.add('hidden');
+        let hasResults = false;
+
+        if (data.searchsploit && data.searchsploit.length > 0) {
+            hasResults = true;
+            document.getElementById('exploit-searchsploit-results').innerHTML = data.searchsploit.map(e => `
+                <div class="bg-slate-800 rounded-lg p-3 flex items-start justify-between gap-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="text-sm text-white font-medium">${e.title}</div>
+                        <div class="text-xs text-slate-400 font-mono mt-1 truncate">${e.path}</div>
+                        <span class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 mt-1 inline-block">${e.type}</span>
+                        ${e.edb_id ? `<span class="text-xs text-slate-400 ml-1">EDB-${e.edb_id}</span>` : ''}
+                    </div>
+                    <button onclick="copyExploitPath('${e.path.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}') "
+                            class="shrink-0 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded">
+                        Copy Path
+                    </button>
+                </div>
+            `).join('');
+            document.getElementById('exploit-searchsploit-section').classList.remove('hidden');
+        }
+
+        if (data.metasploit && data.metasploit.length > 0) {
+            hasResults = true;
+            const msfAvailable = data.msf_available;
+            document.getElementById('exploit-msf-results').innerHTML = data.metasploit.map(m => `
+                <div class="bg-slate-800 rounded-lg p-3 flex items-start justify-between gap-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="text-sm text-orange-300 font-mono">${m.name}</div>
+                        <div class="text-xs text-slate-400 mt-1">${m.description}</div>
+                        ${m.rank ? `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 mt-1 inline-block">${m.rank}</span>` : ''}
+                    </div>
+                    ${msfAvailable ? `
+                    <button onclick="launchMsfExploit('${m.name.replace(/'/g,"\\'")}') "
+                            class="shrink-0 px-3 py-1.5 text-xs bg-orange-600 hover:bg-orange-500 text-white rounded font-semibold">
+                        Launch
+                    </button>` : ''}
+                </div>
+            `).join('');
+            document.getElementById('exploit-msf-section').classList.remove('hidden');
+        }
+
+        if (!hasResults) {
+            document.getElementById('exploit-no-results').classList.remove('hidden');
+        }
+    } catch (e) {
+        document.getElementById('exploit-loading').classList.add('hidden');
+        const noRes = document.getElementById('exploit-no-results');
+        noRes.textContent = 'Error loading exploit data: ' + e.message;
+        noRes.classList.remove('hidden');
+    }
+}
+
+async function launchMsfExploit(module) {
+    const targetIp = document.getElementById('exploit-target-ip').value.trim();
+    const targetPort = document.getElementById('exploit-target-port').value.trim();
+    if (!targetIp) { showNotification('Enter a target IP address', 'error'); return; }
+    if (!confirm(`Launch Metasploit module:\n  ${module}\nagainst ${targetIp}${targetPort ? ':' + targetPort : ''}\n\nOnly proceed against systems you own or have explicit authorization to test.`)) return;
+
+    try {
+        const resp = await fetch('/api/exploit/run', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({module, target_ip: targetIp, target_port: targetPort})
+        });
+        const data = await resp.json();
+        if (!data.success) { showNotification(data.error || 'Failed to launch exploit', 'error'); return; }
+
+        const outputSection = document.getElementById('exploit-output-section');
+        const outputEl = document.getElementById('exploit-output');
+        const statusEl = document.getElementById('exploit-output-status');
+        outputSection.classList.remove('hidden');
+        outputEl.textContent = 'Starting msfconsole...\n';
+        statusEl.textContent = 'Running...';
+        statusEl.className = 'text-xs text-yellow-400';
+
+        const jobId = data.job_id;
+        _exploitPollTimer = setInterval(async () => {
+            try {
+                const r = await fetch('/api/exploit/output/' + jobId);
+                const job = await r.json();
+                outputEl.textContent = job.output || '';
+                outputEl.scrollTop = outputEl.scrollHeight;
+                if (job.done) {
+                    clearInterval(_exploitPollTimer); _exploitPollTimer = null;
+                    statusEl.textContent = `Done (exit ${job.exit_code ?? 'N/A'})`;
+                    statusEl.className = 'text-xs ' + (job.exit_code === 0 ? 'text-green-400' : 'text-red-400');
+                    if (job.error) { statusEl.textContent = 'Error: ' + job.error; statusEl.className = 'text-xs text-red-400'; }
+                }
+            } catch (_) {}
+        }, 2000);
+    } catch (e) {
+        showNotification('Launch error: ' + e.message, 'error');
+    }
+}
+
+function copyExploitPath(path) {
+    navigator.clipboard.writeText(path).then(() => showNotification('Path copied to clipboard', 'success'));
 }
 
 function showNetkbSuccess(message) {
@@ -13098,6 +13311,11 @@ window.exportNetkbEntry = exportNetkbEntry;
 window.researchEntry = researchEntry;
 window.researchVulnerability = researchVulnerability;
 window.exploitVulnerability = exploitVulnerability;
+window.exploitVulnFromModal = exploitVulnFromModal;
+window.openExploitModal = openExploitModal;
+window.closeExploitModal = closeExploitModal;
+window.launchMsfExploit = launchMsfExploit;
+window.copyExploitPath = copyExploitPath;
 
 // Deep Scan Functions
 window.triggerDeepScan = triggerDeepScan;
@@ -13448,13 +13666,17 @@ function showVulnerabilityDetails(vuln) {
                 <div class="text-sm text-slate-400 mb-1">Severity</div>
                 <div class="${severityColors[vuln.severity]} text-2xl font-bold uppercase">${vuln.severity}</div>
             </div>
-            
+
             <div class="bg-slate-800/50 rounded-lg p-4">
                 <div class="text-sm text-slate-400 mb-1">Vulnerability</div>
                 ${formatVulnerabilityWithLinks(vuln.vulnerability)}
             </div>
-            
+
             <div class="grid grid-cols-2 gap-4">
+                <div class="bg-slate-800/50 rounded-lg p-4">
+                    <div class="text-sm text-slate-400 mb-1">Host</div>
+                    <div class="text-white font-mono">${vuln.host || 'Unknown'}</div>
+                </div>
                 <div class="bg-slate-800/50 rounded-lg p-4">
                     <div class="text-sm text-slate-400 mb-1">Service</div>
                     <div class="text-white">${vuln.service}</div>
@@ -13463,20 +13685,29 @@ function showVulnerabilityDetails(vuln) {
                     <div class="text-sm text-slate-400 mb-1">Port</div>
                     <div class="text-white">${vuln.port}</div>
                 </div>
+                <div class="bg-slate-800/50 rounded-lg p-4">
+                    <div class="text-sm text-slate-400 mb-1">Status</div>
+                    <div class="text-white capitalize">${vuln.status}</div>
+                </div>
             </div>
-            
+
             <div class="bg-slate-800/50 rounded-lg p-4">
                 <div class="text-sm text-slate-400 mb-1">Discovered</div>
                 <div class="text-white">${new Date(vuln.discovered).toLocaleString()}</div>
             </div>
-            
-            <div class="bg-slate-800/50 rounded-lg p-4">
-                <div class="text-sm text-slate-400 mb-1">Status</div>
-                <div class="text-white capitalize">${vuln.status}</div>
+
+            <div class="pt-2">
+                <button onclick="exploitVulnFromModal(${JSON.stringify(vuln).replace(/</g,'\\u003c').replace(/>/g,'\\u003e').replace(/&/g,'\\u0026')})"
+                        class="w-full py-2.5 px-4 bg-orange-600 hover:bg-orange-500 text-white font-semibold rounded-lg flex items-center justify-center gap-2 transition-colors">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                    Exploit Options
+                </button>
             </div>
         </div>
     `;
-    
+
     modal.classList.remove('hidden');
     modal.classList.add('flex');
 }
