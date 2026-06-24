@@ -13593,42 +13593,43 @@ def execute_cve_exploit():
                 emit(f'Raw scan read error: {raw_err}', 'warning')
 
             # ── Step 1.5: Resolve vulners.com/githubexploit/ → GitHub URLs ─
-            # vulners.com wraps GitHub repos with their own UUID — resolve each
-            # to the real GitHub repo URL via the Vulners public document API.
-            resolved_urls: dict = {}
+            # Use the Vulners search API to bulk-query all UUIDs in one call
+            # rather than one HTTP request per UUID (which is slow and gets blocked).
+            resolved_urls: dict = {}   # orig_vulners_url -> (github_href, title)
             try:
                 import requests as _req2
-                vuln_refs = [
-                    (u, m.group(1))
-                    for u in raw_github_urls
-                    for m in [_re2.search(r'/githubexploit/([A-F0-9a-f-]{36})', u)]
-                    if m
-                ]
-                if vuln_refs:
-                    emit(f'Resolving {len(vuln_refs)} vulners.com references to GitHub repos...')
-                    for orig_url, uuid in vuln_refs[:15]:
-                        try:
-                            api_r = _req2.get(
-                                f'https://vulners.com/api/v3/id/{uuid}',
-                                timeout=5,
-                                headers={'User-Agent': 'Ragnar-Security-Scanner/1.0'}
-                            )
-                            if api_r.status_code == 200:
-                                doc = api_r.json().get('data', {}).get('documents', {}).get(uuid, {})
-                                href = doc.get('href', '')
-                                title = doc.get('title', '')
-                                if href:
-                                    resolved_urls[orig_url] = (href, title)
-                        except Exception:
-                            pass
-                    resolved_count = len(resolved_urls)
-                    if resolved_count:
-                        emit(f'Resolved {resolved_count} → GitHub repo(s):')
+                uuid_map: dict = {}   # uuid -> orig_url
+                for u in raw_github_urls:
+                    m = _re2.search(r'/githubexploit/([A-F0-9a-f0-9-]{36})', u, _re2.I)
+                    if m:
+                        uuid_map[m.group(1).upper()] = u
+
+                if uuid_map:
+                    emit(f'Querying Vulners API to resolve {len(uuid_map)} PoC UUID(s)...')
+                    # Bulk ID lookup endpoint
+                    bulk_r = _req2.post(
+                        'https://vulners.com/api/v3/search/id/',
+                        json={'id': list(uuid_map.keys())[:20]},
+                        timeout=10,
+                        headers={'User-Agent': 'Ragnar-Security-Scanner/1.0',
+                                 'Content-Type': 'application/json'}
+                    )
+                    if bulk_r.status_code == 200:
+                        docs = bulk_r.json().get('data', {}).get('documents', {})
+                        for uid, doc in docs.items():
+                            href = doc.get('href', '')
+                            title = doc.get('title', '')
+                            orig = uuid_map.get(uid.upper(), '')
+                            if href and orig:
+                                resolved_urls[orig] = (href, title)
+
+                    if resolved_urls:
+                        emit(f'Resolved {len(resolved_urls)} → actual GitHub repos:')
                         for orig, (href, title) in list(resolved_urls.items())[:12]:
-                            label = f' — {title}' if title else ''
-                            emit(f'  {href}{label}')
+                            label = f' — {title[:80]}' if title else ''
+                            emit(f'  GitHub: {href}{label}')
                     else:
-                        emit('Could not resolve vulners.com refs (rate-limited or offline)', 'warning')
+                        emit('Vulners API returned no resolved URLs (may require API key)', 'warning')
             except Exception as resolve_err:
                 emit(f'Vulners URL resolution skipped: {resolve_err}', 'warning')
 
@@ -13698,10 +13699,21 @@ def execute_cve_exploit():
                         break
 
                 if msf_modules:
-                    emit(f'Found {len(msf_modules)} Metasploit module(s):')
-                    for m in msf_modules[:8]:
+                    # Filter to modules whose path actually contains the service name.
+                    # e.g. search 'ssh type:exploit' returns 49 modules including Cisco,
+                    # Acronis etc. — keep only those with /ssh/ in their module path.
+                    svc_key = service_name.lower()
+                    filtered = [m for m in msf_modules if svc_key in m.lower().split('/')]
+                    if not filtered:
+                        # Broader filter: service name appears anywhere in path
+                        filtered = [m for m in msf_modules if svc_key in m.lower()]
+                    if not filtered:
+                        filtered = msf_modules  # fallback: use all results
+
+                    emit(f'Found {len(msf_modules)} module(s), {len(filtered)} match service ({service_name}):')
+                    for m in filtered[:8]:
                         emit(f'  {m}')
-                    mod = msf_modules[0]
+                    mod = filtered[0]
                     emit(f'Running: {mod} against {target_ip}:{target_port}', 'warning')
                     try:
                         cmds = (f'use {mod};set RHOSTS {target_ip};set RPORT {target_port or 0};'
