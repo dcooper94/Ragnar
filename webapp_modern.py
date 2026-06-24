@@ -13117,7 +13117,7 @@ def _collect_manual_targets():
                         ports = [p.strip() for p in ports_str.split(';') if p.strip()]
                 
                 if ip and ip not in target_ips:
-                    # Load vulnerability data per port from scan_findings
+                    # Load vulnerability data per port — scan_findings first, then network_intelligence
                     vuln_by_port: dict = {}
                     try:
                         with db.get_connection() as _vc:
@@ -13134,6 +13134,33 @@ def _collect_manual_targets():
                                     'cvss': vr['cvss_score'],
                                     'severity': vr['severity'] or 'unknown',
                                 })
+                    except Exception:
+                        pass
+                    # Also merge in-memory network_intelligence (catches pre-SQL-mirror scans)
+                    try:
+                        import re as _re2
+                        _ni = shared_data.network_intelligence
+                        if _ni and hasattr(_ni, 'active_vulnerabilities'):
+                            for _nv in _ni.active_vulnerabilities.values():
+                                for _vd in _nv.values():
+                                    if _vd.get('host') != ip:
+                                        continue
+                                    _vport = str(_vd.get('port', ''))
+                                    _vtxt = _vd.get('vulnerability', '')
+                                    _vsev = _vd.get('severity', 'unknown')
+                                    _cm = _re2.search(r'(CVE-\d{4}-\d+)', _vtxt)
+                                    _sm = _re2.search(r'Score:\s*(\d{1,2}\.\d)', _vtxt)
+                                    _cve_id = _cm.group(1) if _cm else None
+                                    _cvss = float(_sm.group(1)) if _sm else None
+                                    if _cve_id and _vport:
+                                        _existing = vuln_by_port.get(_vport, [])
+                                        if not any(e['cve'] == _cve_id for e in _existing):
+                                            vuln_by_port.setdefault(_vport, []).append({
+                                                'cve': _cve_id,
+                                                'title': _vtxt,
+                                                'cvss': _cvss,
+                                                'severity': _vsev,
+                                            })
                     except Exception:
                         pass
                     targets.append({
