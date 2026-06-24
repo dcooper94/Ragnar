@@ -13586,13 +13586,51 @@ def execute_cve_exploit():
                     if raw_edb_ids:
                         emit(f'vulners.nse ExploitDB refs: {", ".join(f"EDB-{e}" for e in raw_edb_ids)}')
                     if raw_github_urls:
-                        emit(f'vulners.nse PoC URLs ({len(raw_github_urls)}):')
-                        for url in raw_github_urls[:8]:
-                            emit(f'  {url}')
+                        emit(f'vulners.nse found {len(raw_github_urls)} exploit/PoC references (resolving...)')
                 else:
                     emit('Raw nmap scan file not found — run a vuln scan first for best results', 'warning')
             except Exception as raw_err:
                 emit(f'Raw scan read error: {raw_err}', 'warning')
+
+            # ── Step 1.5: Resolve vulners.com/githubexploit/ → GitHub URLs ─
+            # vulners.com wraps GitHub repos with their own UUID — resolve each
+            # to the real GitHub repo URL via the Vulners public document API.
+            resolved_urls: dict = {}
+            try:
+                import requests as _req2
+                vuln_refs = [
+                    (u, m.group(1))
+                    for u in raw_github_urls
+                    for m in [_re2.search(r'/githubexploit/([A-F0-9a-f-]{36})', u)]
+                    if m
+                ]
+                if vuln_refs:
+                    emit(f'Resolving {len(vuln_refs)} vulners.com references to GitHub repos...')
+                    for orig_url, uuid in vuln_refs[:15]:
+                        try:
+                            api_r = _req2.get(
+                                f'https://vulners.com/api/v3/id/{uuid}',
+                                timeout=5,
+                                headers={'User-Agent': 'Ragnar-Security-Scanner/1.0'}
+                            )
+                            if api_r.status_code == 200:
+                                doc = api_r.json().get('data', {}).get('documents', {}).get(uuid, {})
+                                href = doc.get('href', '')
+                                title = doc.get('title', '')
+                                if href:
+                                    resolved_urls[orig_url] = (href, title)
+                        except Exception:
+                            pass
+                    resolved_count = len(resolved_urls)
+                    if resolved_count:
+                        emit(f'Resolved {resolved_count} → GitHub repo(s):')
+                        for orig, (href, title) in list(resolved_urls.items())[:12]:
+                            label = f' — {title}' if title else ''
+                            emit(f'  {href}{label}')
+                    else:
+                        emit('Could not resolve vulners.com refs (rate-limited or offline)', 'warning')
+            except Exception as resolve_err:
+                emit(f'Vulners URL resolution skipped: {resolve_err}', 'warning')
 
             # ── Step 2: NVD API — additional exploit references ────────────
             try:
@@ -13755,9 +13793,14 @@ def execute_cve_exploit():
             # ── Step 5: Surface all PoC URLs for manual use ────────────────
             all_pocs = list(dict.fromkeys(raw_github_urls + nvd_poc_urls))
             if all_pocs and not session_opened:
-                emit(f'PoC / exploit references ({len(all_pocs)} total):')
-                for url in all_pocs[:10]:
-                    emit(f'  {url}')
+                emit(f'All PoC / exploit references ({len(all_pocs)} total):')
+                for url in all_pocs[:15]:
+                    if url in resolved_urls:
+                        href, title = resolved_urls[url]
+                        label = f' — {title}' if title else ''
+                        emit(f'  GitHub: {href}{label}')
+                    else:
+                        emit(f'  {url}')
 
             # ── Final status ───────────────────────────────────────────────
             has_intel = bool(all_edb_ids or all_pocs or tried_any)
