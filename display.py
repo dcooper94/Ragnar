@@ -2661,6 +2661,13 @@ class Display:
         self.manual_mode_txt = ""
         while not self.shared_data.display_should_exit:
             try:
+                if self.epd_helper is None:
+                    # Hardware init failed at startup; check if shared_data recovered it
+                    self.epd_helper = getattr(self.shared_data, 'epd_helper', None)
+                    if self.epd_helper is None:
+                        logger.warning("EPD helper not initialized — hardware unavailable, sleeping 30s")
+                        time.sleep(30)
+                        continue
                 self.epd_helper.init_partial_update()
                 # Pull latest orientation settings so web toggles take effect without restarting the service.
                 self.screen_reversed = self.shared_data.screen_reversed

@@ -3,6 +3,7 @@
 import importlib
 import logging
 import time
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,10 @@ KNOWN_EPD_TYPES = [
     "max7219_4panel",
     "max7219_8panel",
 ]
+
+# Seconds to wait for a single driver's init() before considering it hung.
+# e-paper BUSY pin can stay high for up to ~2s during reset; 8s gives a comfortable margin.
+_AUTO_DETECT_INIT_TIMEOUT = 8.0
 
 class EPDHelper:
     def __init__(self, epd_type):
@@ -123,8 +128,15 @@ class EPDHelper:
             raise
 
     @staticmethod
-    def auto_detect(known_types=None):
+    def auto_detect(known_types=None, init_timeout=_AUTO_DETECT_INIT_TIMEOUT):
         """Try each known EPD driver and return the first that initializes successfully.
+
+        Each driver's init() is run in a thread with a timeout to avoid hanging
+        on a BUSY pin that never goes LOW (which happens when the wrong driver
+        is probed against real hardware).
+
+        Uses init_full_update() instead of raw epd.init() so that drivers like
+        V1/V2 that require a LUT argument are handled correctly.
 
         Returns:
             tuple: (epd_type_string, width, height) on success, or None if no display detected.
@@ -133,10 +145,25 @@ class EPDHelper:
             known_types = KNOWN_EPD_TYPES
 
         for epd_type in known_types:
+            helper = None
             try:
                 logger.info(f"Auto-detect: trying {epd_type}...")
                 helper = EPDHelper(epd_type)
-                helper.epd.init()
+
+                # Run init in a thread with timeout so BUSY-pin hangs don't block forever
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(helper.init_full_update)
+                    try:
+                        future.result(timeout=init_timeout)
+                    except concurrent.futures.TimeoutError:
+                        logger.debug(f"Auto-detect: {epd_type} init timed out after {init_timeout}s (BUSY pin stuck?)")
+                        try:
+                            helper.epd.sleep()
+                        except Exception:
+                            pass
+                        time.sleep(0.3)
+                        continue
+
                 w, h = helper.epd.width, helper.epd.height
                 try:
                     helper.epd.sleep()
@@ -147,10 +174,11 @@ class EPDHelper:
                 return (epd_type, w, h)
             except Exception as e:
                 logger.debug(f"Auto-detect: {epd_type} failed: {e}")
-                try:
-                    helper.epd.sleep()
-                except Exception:
-                    pass
+                if helper is not None:
+                    try:
+                        helper.epd.sleep()
+                    except Exception:
+                        pass
                 time.sleep(0.3)
         logger.warning("Auto-detect: no e-paper display detected")
         return None

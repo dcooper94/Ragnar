@@ -10796,6 +10796,35 @@ def get_epaper_display():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/display/diagnose')
+def display_diagnose():
+    """Return current display configuration and hardware status for debugging."""
+    try:
+        epd_type = shared_data.config.get('epd_type', 'unknown')
+        epd_helper = getattr(shared_data, 'epd_helper', None)
+        info = {
+            'epd_type_config': epd_type,
+            'epd_helper_active': epd_helper is not None,
+            'width': getattr(shared_data, 'width', None),
+            'height': getattr(shared_data, 'height', None),
+            'ref_width': shared_data.config.get('ref_width'),
+            'ref_height': shared_data.config.get('ref_height'),
+            'screen_reversed': getattr(shared_data, 'screen_reversed', 0),
+            'web_screen_reversed': getattr(shared_data, 'web_screen_reversed', 0),
+        }
+        if epd_helper is not None:
+            info['epd_driver_width'] = getattr(epd_helper.epd, 'width', None)
+            info['epd_driver_height'] = getattr(epd_helper.epd, 'height', None)
+        screen_png = os.path.join(shared_data.webdir, 'screen.png')
+        info['screen_png_exists'] = os.path.exists(screen_png)
+        if info['screen_png_exists']:
+            info['screen_png_mtime'] = int(os.path.getmtime(screen_png))
+        return jsonify(info)
+    except Exception as e:
+        logger.error(f"Error in display diagnose: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/display')
 def get_display():
     """Get current EPD display image"""
