@@ -31,6 +31,11 @@ KNOWN_EPD_TYPES = [
 _AUTO_DETECT_INIT_TIMEOUT = 8.0
 
 class EPDHelper:
+    # How many partial updates to allow before forcing a full refresh.
+    # Partial updates accumulate ghosting artifacts; a periodic full refresh
+    # (displayPartBaseImage) resets both RAM banks and restores even contrast.
+    _PARTIAL_REFRESH_LIMIT = 20
+
     def __init__(self, epd_type):
         self.epd_type = epd_type
         self.epd = self._load_epd_module()
@@ -38,6 +43,7 @@ class EPDHelper:
         # Drivers like V3/V4 require displayPartBaseImage() before displayPartial()
         # so the controller has a valid background image in RAM26 for pixel comparison.
         self._base_image_set = False
+        self._partial_count = 0
 
     def _load_epd_module(self):
         try:
@@ -90,17 +96,19 @@ class EPDHelper:
 
             buf = self.epd.getbuffer(image)
 
-            # V3/V4 e-paper controllers require both RAM banks (RAM24 + RAM26) to be
-            # loaded before partial updates can work correctly. RAM26 holds the
-            # "background" image the controller uses to compute pixel changes. After a
-            # clear or cold start RAM26 has stale/undefined content, which makes partial
-            # updates produce a white or garbled display.
-            # Fix: use displayPartBaseImage() on the first call to fill both banks,
-            # then switch to displayPartial() for all subsequent fast updates.
-            if not self._base_image_set and hasattr(self.epd, 'displayPartBaseImage'):
+            # V3/V4 controllers need both RAM banks seeded before partial updates,
+            # and need a periodic full refresh to prevent ghosting/contrast degradation.
+            # displayPartBaseImage() writes to both RAM24 + RAM26 and does a full
+            # refresh — this resets any accumulated partial-update artifacts.
+            needs_full_refresh = (
+                not self._base_image_set or
+                self._partial_count >= self._PARTIAL_REFRESH_LIMIT
+            )
+            if needs_full_refresh and hasattr(self.epd, 'displayPartBaseImage'):
                 self.epd.displayPartBaseImage(buf)
                 self._base_image_set = True
-                logger.info("Partial display base image initialized (full refresh to seed RAM26).")
+                self._partial_count = 0
+                logger.info("Full refresh (base image seeded / periodic ghosting reset).")
                 return
 
             if hasattr(self.epd, 'displayPartial'):
@@ -115,6 +123,7 @@ class EPDHelper:
                     self.epd.display_Partial(buf)
             else:
                 self.epd.display(buf)
+            self._partial_count += 1
             logger.info("Partial display update complete.")
         except Exception as e:
             logger.error(f"Error during partial display update: {e} (image={image.size if hasattr(image,'size') else '?'}, epd={self.epd.width}x{self.epd.height}, buf_len={len(buf) if 'buf' in dir() else '?'})")
