@@ -1673,6 +1673,12 @@ class SharedData:
         self.ragnarstatustext = self.ragnarorch_status  # Mettre à jour le texte du statut
 
 
+    # Display types that use colour/greyscale rendering — images should NOT be
+    # pre-converted to 1-bit for these.
+    _COLOR_DISPLAY_TYPES = frozenset({
+        'gc9a01', 'ssd1306', 'lcd1602', 'max7219_4panel', 'max7219_8panel',
+    })
+
     def load_image(self, image_path, scale=None):
         """Load an image, optionally resizing it by the given scale factor."""
         if Image is None:
@@ -1686,6 +1692,12 @@ class SharedData:
                 new_w = max(1, int(img.width * scale))
                 new_h = max(1, int(img.height * scale))
                 img = img.resize((new_w, new_h), Image.Resampling.NEAREST)
+            # E-ink displays are 1-bit. Pre-convert with a hard threshold so that
+            # pasting onto the '1'-mode canvas does not trigger PIL's Floyd-Steinberg
+            # dithering, which produces a noisy dotted pattern on the physical display.
+            epd_type = self.config.get('epd_type', '')
+            if epd_type not in self._COLOR_DISPLAY_TYPES and img.mode != '1':
+                img = img.convert('1', dither=Image.Dither.NONE)
             return img
         except Exception as e:
             logger.error(f"Error loading image {image_path}: {e}")
