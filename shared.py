@@ -1535,18 +1535,18 @@ class SharedData:
             sx = getattr(self, 'scale_factor_x', 1.0)
             is_wide = sx > 1.2  # Display is significantly wider than 2.13" (e.g. 2.7")
 
-            self.font_arial14 = self.load_font('Arial.ttf', max(9, int(14 * sf)))
-            self.font_arial11 = self.load_font('Arial.ttf', max(8, int(11 * sf)))
-            self.font_arial9 = self.load_font('Arial.ttf', max(7, int(9 * sf)))
-            self.font_arialbold = self.load_font('Arial.ttf', max(9, int(12 * sf)))
+            self.font_arial14 = self.load_font('Arial.ttf', max(13, int(14 * sf)))
+            self.font_arial11 = self.load_font('Arial.ttf', max(12, int(13 * sf)))
+            self.font_arial9 = self.load_font('Arial.ttf', max(11, int(11 * sf)))
+            self.font_arialbold = self.load_font('Arial.ttf', max(11, int(12 * sf)))
 
             # Viking title font: keep same size on wider displays (no reduction needed)
             if is_wide:
-                viking_size = max(10, int(13 * sf))
-                viking_sm_size = max(8, int(10 * sf))
+                viking_size = max(13, int(15 * sf))
+                viking_sm_size = max(11, int(12 * sf))
             else:
-                viking_size = max(10, int(13 * sf))
-                viking_sm_size = max(8, int(10 * sf))
+                viking_size = max(13, int(15 * sf))
+                viking_sm_size = max(11, int(12 * sf))
             self.font_viking = self.load_font('Viking.TTF', viking_size)
             self.font_viking_sm = self.load_font('Viking.TTF', viking_sm_size)
 
