@@ -1535,18 +1535,18 @@ class SharedData:
             sx = getattr(self, 'scale_factor_x', 1.0)
             is_wide = sx > 1.2  # Display is significantly wider than 2.13" (e.g. 2.7")
 
-            self.font_arial14 = self.load_font('Arial.ttf', max(13, int(14 * sf)))
-            self.font_arial11 = self.load_font('Arial.ttf', max(12, int(13 * sf)))
-            self.font_arial9 = self.load_font('Arial.ttf', max(11, int(11 * sf)))
-            self.font_arialbold = self.load_font('Arial.ttf', max(11, int(12 * sf)))
+            self.font_arial14 = self.load_font('Arial.ttf', max(9, int(14 * sf)))
+            self.font_arial11 = self.load_font('Arial.ttf', max(8, int(11 * sf)))
+            self.font_arial9 = self.load_font('Arial.ttf', max(7, int(9 * sf)))
+            self.font_arialbold = self.load_font('Arial.ttf', max(9, int(12 * sf)))
 
             # Viking title font: keep same size on wider displays (no reduction needed)
             if is_wide:
-                viking_size = max(13, int(15 * sf))
-                viking_sm_size = max(11, int(12 * sf))
+                viking_size = max(10, int(13 * sf))
+                viking_sm_size = max(8, int(10 * sf))
             else:
-                viking_size = max(13, int(15 * sf))
-                viking_sm_size = max(11, int(12 * sf))
+                viking_size = max(10, int(13 * sf))
+                viking_sm_size = max(8, int(10 * sf))
             self.font_viking = self.load_font('Viking.TTF', viking_size)
             self.font_viking_sm = self.load_font('Viking.TTF', viking_sm_size)
 
@@ -1673,12 +1673,6 @@ class SharedData:
         self.ragnarstatustext = self.ragnarorch_status  # Mettre à jour le texte du statut
 
 
-    # Display types that use colour/greyscale rendering — images should NOT be
-    # pre-converted to 1-bit for these.
-    _COLOR_DISPLAY_TYPES = frozenset({
-        'gc9a01', 'ssd1306', 'lcd1602', 'max7219_4panel', 'max7219_8panel',
-    })
-
     def load_image(self, image_path, scale=None):
         """Load an image, optionally resizing it by the given scale factor."""
         if Image is None:
@@ -1692,12 +1686,6 @@ class SharedData:
                 new_w = max(1, int(img.width * scale))
                 new_h = max(1, int(img.height * scale))
                 img = img.resize((new_w, new_h), Image.Resampling.NEAREST)
-            # E-ink displays are 1-bit. Pre-convert with a hard threshold so that
-            # pasting onto the '1'-mode canvas does not trigger PIL's Floyd-Steinberg
-            # dithering, which produces a noisy dotted pattern on the physical display.
-            epd_type = self.config.get('epd_type', '')
-            if epd_type not in self._COLOR_DISPLAY_TYPES and img.mode != '1':
-                img = img.convert('1', dither=Image.Dither.NONE)
             return img
         except Exception as e:
             logger.error(f"Error loading image {image_path}: {e}")

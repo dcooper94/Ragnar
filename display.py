@@ -2770,9 +2770,9 @@ class Display:
                 except Exception:
                     pass
                 if _pisugar_available:
-                    draw.text((int(40 * sx), int(5 * sy)), "RAGNAR", font=self.shared_data.font_viking_sm, fill=0)
+                    draw.text((int(40 * sx), int(6 * sy)), "RAGNAR", font=self.shared_data.font_viking_sm, fill=0)
                 else:
-                    draw.text((int(37 * sx), int(4 * sy)), "RAGNAR", font=self.shared_data.font_viking, fill=0)
+                    draw.text((int(37 * sx), int(5 * sy)), "RAGNAR", font=self.shared_data.font_viking, fill=0)
                 draw.text((int(110 * sx), int(170 * sy)), self.manual_mode_txt, font=self.shared_data.font_arial14, fill=0)
                 
                 # Show AP status or WiFi status in the top-left corner
@@ -2807,15 +2807,15 @@ class Display:
                 # Stats — positions scaled to fill the physical width/height,
                 # but icon images stay at their original pixel size.
                 stats = [
-                    (self.shared_data.target,    (int(8 * sx),   int(25 * sy)), (int(28 * sx),  int(25 * sy)), str(self.shared_data.targetnbr)),
-                    (self.shared_data.port,      (int(47 * sx),  int(25 * sy)), (int(67 * sx),  int(25 * sy)), str(self.shared_data.portnbr)),
-                    (self.shared_data.vuln,      (int(86 * sx),  int(25 * sy)), (int(104 * sx), int(25 * sy)), str(self.shared_data.vulnnbr)),
-                    (self.shared_data.cred,      (int(8 * sx),   int(45 * sy)), (int(28 * sx),  int(45 * sy)), str(self.shared_data.crednbr)),
+                    (self.shared_data.target,    (int(8 * sx),   int(22 * sy)), (int(28 * sx),  int(22 * sy)), str(self.shared_data.targetnbr)),
+                    (self.shared_data.port,      (int(47 * sx),  int(22 * sy)), (int(67 * sx),  int(22 * sy)), str(self.shared_data.portnbr)),
+                    (self.shared_data.vuln,      (int(86 * sx),  int(22 * sy)), (int(106 * sx), int(22 * sy)), str(self.shared_data.vulnnbr)),
+                    (self.shared_data.cred,      (int(8 * sx),   int(41 * sy)), (int(28 * sx),  int(41 * sy)), str(self.shared_data.crednbr)),
                     (self.shared_data.money,     (int(3 * sx),   int(172 * sy)), (int(3 * sx),  int(192 * sy)), str(self.shared_data.coinnbr)),
                     (self.shared_data.level,     (int(2 * sx),   int(217 * sy)), (int(4 * sx),  int(237 * sy)), str(self.shared_data.levelnbr)),
-                    (self.shared_data.zombie,    (int(47 * sx),  int(45 * sy)), (int(67 * sx),  int(45 * sy)), str(self.shared_data.zombiesnbr)),
+                    (self.shared_data.zombie,    (int(47 * sx),  int(41 * sy)), (int(67 * sx),  int(41 * sy)), str(self.shared_data.zombiesnbr)),
                     (self.shared_data.networkkb, (int(102 * sx), int(190 * sy)), (int(102 * sx), int(208 * sy)), str(self.shared_data.networkkbnbr)),
-                    (self.shared_data.data,      (int(86 * sx),  int(45 * sy)), (int(104 * sx), int(45 * sy)), str(self.shared_data.datanbr)),
+                    (self.shared_data.data,      (int(86 * sx),  int(41 * sy)), (int(106 * sx), int(41 * sy)), str(self.shared_data.datanbr)),
                     (self.shared_data.attacks,   (int(100 * sx), int(218 * sy)), (int(102 * sx), int(237 * sy)), str(self.shared_data.attacksnbr)),
                 ]
 
@@ -2824,9 +2824,9 @@ class Display:
                     draw.text(text_pos, text, font=self.shared_data.font_arial9, fill=0)
 
                 self.shared_data.update_ragnarstatus()
-                image.paste(self.shared_data.ragnarstatusimage, (int(3 * sx), int(66 * sy)))
-                draw.text((int(35 * sx), int(69 * sy)), self.shared_data.ragnarstatustext, font=self.shared_data.font_arial9, fill=0)
-                draw.text((int(35 * sx), int(82 * sy)), self.shared_data.ragnarstatustext2, font=self.shared_data.font_arial9, fill=0)
+                image.paste(self.shared_data.ragnarstatusimage, (int(3 * sx), int(60 * sy)))
+                draw.text((int(35 * sx), int(65 * sy)), self.shared_data.ragnarstatustext, font=self.shared_data.font_arial9, fill=0)
+                draw.text((int(35 * sx), int(75 * sy)), self.shared_data.ragnarstatustext2, font=self.shared_data.font_arial9, fill=0)
 
                 # Frise ribbon
                 if self.shared_data.frise is not None:
@@ -2837,12 +2837,12 @@ class Display:
 
                 # Frame & dividers — span full physical width
                 draw.rectangle((1, 1, W - 1, H - 1), outline=0)
-                draw.line((1, int(23 * sy), W - 1, int(23 * sy)), fill=0)
-                draw.line((1, int(65 * sy), W - 1, int(65 * sy)), fill=0)
-                draw.line((1, int(95 * sy), W - 1, int(95 * sy)), fill=0)
+                draw.line((1, int(20 * sy), W - 1, int(20 * sy)), fill=0)
+                draw.line((1, int(59 * sy), W - 1, int(59 * sy)), fill=0)
+                draw.line((1, int(87 * sy), W - 1, int(87 * sy)), fill=0)
 
                 lines = self.shared_data.wrap_text(self.shared_data.ragnarsays, self.shared_data.font_arialbold, W - 4)
-                y_text = int(98 * sy)
+                y_text = int(90 * sy)
 
                 # Character image — centred on the full canvas
                 if self.main_image is not None:
