@@ -128,6 +128,27 @@ class EPDHelper:
             raise
 
     @staticmethod
+    def _release_epdconfig_gpio():
+        """Force-release any GPIO pins held by epdconfig.implementation.
+
+        Called between auto-detect attempts so that a failed probe doesn't
+        leave zombie gpiozero objects that block the next driver from
+        claiming the same pins.
+        """
+        try:
+            from resources.waveshare_epd import epdconfig
+            impl = getattr(epdconfig, 'implementation', None)
+            if impl and hasattr(impl, '_release_gpio'):
+                impl._release_gpio()
+            if impl and hasattr(impl, 'SPI'):
+                try:
+                    impl.SPI.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    @staticmethod
     def auto_detect(known_types=None, init_timeout=_AUTO_DETECT_INIT_TIMEOUT):
         """Try each known EPD driver and return the first that initializes successfully.
 
@@ -161,6 +182,7 @@ class EPDHelper:
                             helper.epd.sleep()
                         except Exception:
                             pass
+                        EPDHelper._release_epdconfig_gpio()
                         time.sleep(0.3)
                         continue
 
@@ -179,6 +201,7 @@ class EPDHelper:
                         helper.epd.sleep()
                     except Exception:
                         pass
+                EPDHelper._release_epdconfig_gpio()
                 time.sleep(0.3)
         logger.warning("Auto-detect: no e-paper display detected")
         return None

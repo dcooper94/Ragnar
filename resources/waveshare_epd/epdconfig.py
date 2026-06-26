@@ -20,18 +20,44 @@ class RaspberryPi:
 
     def __init__(self):
         import spidev
-        import gpiozero
-        
         self.SPI = spidev.SpiDev()
-        self.GPIO_RST_PIN    = gpiozero.LED(self.RST_PIN)
-        self.GPIO_DC_PIN     = gpiozero.LED(self.DC_PIN)
-        # self.GPIO_CS_PIN     = gpiozero.LED(self.CS_PIN)
-        self.GPIO_PWR_PIN    = gpiozero.LED(self.PWR_PIN)
-        self.GPIO_BUSY_PIN   = gpiozero.Button(self.BUSY_PIN, pull_up = False)
+        # GPIO objects are created lazily in _ensure_gpio() so that importing
+        # epdconfig does NOT claim any hardware pins at module load time.
+        # This prevents 'GPIO busy' errors when a previous attempt partially
+        # claimed pins and left zombie gpiozero objects behind.
+        self.GPIO_RST_PIN  = None
+        self.GPIO_DC_PIN   = None
+        self.GPIO_PWR_PIN  = None
+        self.GPIO_BUSY_PIN = None
 
-        
+    def _ensure_gpio(self):
+        """Create gpiozero GPIO objects if they haven't been created yet."""
+        if self.GPIO_RST_PIN is not None:
+            return
+        import gpiozero
+        self.GPIO_RST_PIN  = gpiozero.LED(self.RST_PIN)
+        self.GPIO_DC_PIN   = gpiozero.LED(self.DC_PIN)
+        # self.GPIO_CS_PIN = gpiozero.LED(self.CS_PIN)
+        self.GPIO_PWR_PIN  = gpiozero.LED(self.PWR_PIN)
+        self.GPIO_BUSY_PIN = gpiozero.Button(self.BUSY_PIN, pull_up=False)
+
+    def _release_gpio(self):
+        """Close all GPIO objects and nullify them so the pins are freed.
+
+        Called after a failed init attempt so the next driver probe starts
+        with a clean slate and doesn't hit 'pin already in use' errors.
+        """
+        for attr in ('GPIO_RST_PIN', 'GPIO_DC_PIN', 'GPIO_PWR_PIN', 'GPIO_BUSY_PIN'):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     def digital_write(self, pin, value):
+        self._ensure_gpio()
         if pin == self.RST_PIN:
             if value:
                 self.GPIO_RST_PIN.on()
@@ -54,16 +80,17 @@ class RaspberryPi:
                 self.GPIO_PWR_PIN.off()
 
     def digital_read(self, pin):
+        self._ensure_gpio()
         if pin == self.BUSY_PIN:
             return self.GPIO_BUSY_PIN.value
         elif pin == self.RST_PIN:
-            return self.RST_PIN.value
+            return self.GPIO_RST_PIN.value
         elif pin == self.DC_PIN:
-            return self.DC_PIN.value
+            return self.GPIO_DC_PIN.value
         # elif pin == self.CS_PIN:
         #     return self.CS_PIN.value
         elif pin == self.PWR_PIN:
-            return self.PWR_PIN.value
+            return self.GPIO_PWR_PIN.value
 
     def delay_ms(self, delaytime):
         time.sleep(delaytime / 1000.0)
@@ -84,8 +111,9 @@ class RaspberryPi:
         return self.DEV_SPI.DEV_SPI_ReadData()
 
     def module_init(self, cleanup=False):
+        self._ensure_gpio()
         self.GPIO_PWR_PIN.on()
-        
+
         if cleanup:
             find_dirs = [
                 os.path.dirname(os.path.realpath(__file__)),
@@ -135,21 +163,22 @@ class RaspberryPi:
 
     def module_exit(self, cleanup=False):
         # logger.debug("spi end")
-        self.SPI.close()
+        try:
+            self.SPI.close()
+        except Exception:
+            pass
 
-        self.GPIO_RST_PIN.off()
-        self.GPIO_DC_PIN.off()
-        self.GPIO_PWR_PIN.off()
+        if self.GPIO_RST_PIN:
+            self.GPIO_RST_PIN.off()
+        if self.GPIO_DC_PIN:
+            self.GPIO_DC_PIN.off()
+        if self.GPIO_PWR_PIN:
+            self.GPIO_PWR_PIN.off()
         # logger.debug("close 5V, Module enters 0 power consumption ...")
-        
-        if cleanup:
-            self.GPIO_RST_PIN.close()
-            self.GPIO_DC_PIN.close()
-            # self.GPIO_CS_PIN.close()
-            self.GPIO_PWR_PIN.close()
-            self.GPIO_BUSY_PIN.close()
 
-        
+        if cleanup:
+            self._release_gpio()
+
 
 
 
@@ -204,9 +233,9 @@ class JetsonNano:
         self.GPIO.setup(self.CS_PIN, self.GPIO.OUT)
         self.GPIO.setup(self.PWR_PIN, self.GPIO.OUT)
         self.GPIO.setup(self.BUSY_PIN, self.GPIO.IN)
-        
+
         self.GPIO.output(self.PWR_PIN, 1)
-        
+
         self.SPI.SYSFS_software_spi_begin()
         return 0
 
@@ -267,7 +296,7 @@ class SunriseX3:
             self.GPIO.setup(self.BUSY_PIN, self.GPIO.IN)
 
             self.GPIO.output(self.PWR_PIN, 1)
-        
+
             # SPI device, bus = 0, device = 0
             self.SPI.open(2, 0)
             self.SPI.max_speed_hz = 4000000
