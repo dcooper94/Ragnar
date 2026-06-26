@@ -7,10 +7,12 @@ import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
-# Known EPD types to try during auto-detection (most common first)
+# Known EPD types to try during auto-detection (most common first).
+# V3 is listed before V4 so that a V3 display is detected as V3 rather than V4
+# (the V4 init sequence can succeed on V3 hardware, which would give the wrong driver).
 KNOWN_EPD_TYPES = [
-    "epd2in13_V4",
     "epd2in13_V3",
+    "epd2in13_V4",
     "epd2in13_V2",
     "epd2in7_V2",
     "epd2in7",
@@ -32,6 +34,10 @@ class EPDHelper:
     def __init__(self, epd_type):
         self.epd_type = epd_type
         self.epd = self._load_epd_module()
+        # Tracks whether both RAM banks have been initialized for partial updates.
+        # Drivers like V3/V4 require displayPartBaseImage() before displayPartial()
+        # so the controller has a valid background image in RAM26 for pixel comparison.
+        self._base_image_set = False
 
     def _load_epd_module(self):
         try:
@@ -83,6 +89,19 @@ class EPDHelper:
                 image = image.resize((epd_w, epd_h))
 
             buf = self.epd.getbuffer(image)
+
+            # V3/V4 e-paper controllers require both RAM banks (RAM24 + RAM26) to be
+            # loaded before partial updates can work correctly. RAM26 holds the
+            # "background" image the controller uses to compute pixel changes. After a
+            # clear or cold start RAM26 has stale/undefined content, which makes partial
+            # updates produce a white or garbled display.
+            # Fix: use displayPartBaseImage() on the first call to fill both banks,
+            # then switch to displayPartial() for all subsequent fast updates.
+            if not self._base_image_set and hasattr(self.epd, 'displayPartBaseImage'):
+                self.epd.displayPartBaseImage(buf)
+                self._base_image_set = True
+                logger.info("Partial display base image initialized (full refresh to seed RAM26).")
+                return
 
             if hasattr(self.epd, 'displayPartial'):
                 self.epd.displayPartial(buf)

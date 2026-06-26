@@ -1021,19 +1021,25 @@ class SharedData:
             logger.error(f"Error initializing EPD display: {e}")
             # Try auto-detection as fallback before giving up
             logger.info("Attempting auto-detection as fallback...")
+            # Read the user's original configured type before any auto-detect modifies it.
+            _user_epd_type = self.config.get("epd_type", DEFAULT_EPD_TYPE)
             try:
                 result = EPDHelper.auto_detect()
                 if result:
                     epd_type = result[0]
                     logger.info(f"Fallback auto-detected EPD: {epd_type} ({result[1]}x{result[2]})")
-                    self.config['epd_type'] = epd_type
+                    # Only persist the auto-detected type when the user hasn't explicitly
+                    # set a specific driver. Overwriting an explicit V3/V4/etc. with a
+                    # different auto-detected type is the root cause of "keeps reverting".
+                    if _user_epd_type == "auto":
+                        self.config['epd_type'] = epd_type
+                        self.save_config()
                     self.apply_display_profile(epd_type)
                     self.epd_helper = EPDHelper(epd_type)
                     self.epd_helper.init_full_update()
                     self.width, self.height = self.epd_helper.epd.width, self.epd_helper.epd.height
                     self.screen_reversed = normalize_rotation(self.config.get("screen_reversed", 0))
                     self.web_screen_reversed = 0
-                    self.save_config()
                     logger.info(f"EPD {epd_type} initialized via fallback with size: {self.width}x{self.height}")
                     return
             except Exception as e2:
