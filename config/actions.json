@@ -70,6 +70,34 @@
         "b_parent": null
     },
     {
+        "b_module": "ssh_connector",
+        "b_class": "SSHBruteforce",
+        "b_port": 22,
+        "b_status": "brute_force_ssh",
+        "b_parent": null
+    },
+    {
+        "b_module": "smb_connector",
+        "b_class": "SMBBruteforce",
+        "b_port": 445,
+        "b_status": "brute_force_smb",
+        "b_parent": null
+    },
+    {
+        "b_module": "sql_connector",
+        "b_class": "SQLBruteforce",
+        "b_port": 3306,
+        "b_status": "brute_force_sql",
+        "b_parent": null
+    },
+    {
+        "b_module": "telnet_connector",
+        "b_class": "TelnetBruteforce",
+        "b_port": 23,
+        "b_status": "brute_force_telnet",
+        "b_parent": null
+    },
+    {
         "b_module": "steal_data_sql",
         "b_class": "StealDataSQL",
         "b_port": 3306,
@@ -91,6 +119,20 @@
         "b_parent": "RDPBruteforce"
     },
     {
+        "b_module": "steal_files_ssh",
+        "b_class": "StealFilesSSH",
+        "b_port": 22,
+        "b_status": "steal_files_ssh",
+        "b_parent": "SSHBruteforce"
+    },
+    {
+        "b_module": "steal_files_smb",
+        "b_class": "StealFilesSMB",
+        "b_port": 445,
+        "b_status": "steal_files_smb",
+        "b_parent": "SMBBruteforce"
+    },
+    {
         "b_module": "steal_files_telnet",
         "b_class": "StealFilesTelnet",
         "b_port": 23,
@@ -98,10 +140,66 @@
         "b_parent": "TelnetBruteforce"
     },
     {
-        "b_module": "telnet_connector",
-        "b_class": "TelnetBruteforce",
-        "b_port": 23,
-        "b_status": "brute_force_telnet",
+        "b_module": "lynis_pentest_ssh",
+        "b_class": "LynisPentestSSH",
+        "b_port": 22,
+        "b_status": "lynis_pentest_ssh",
+        "b_parent": "SSHBruteforce"
+    },
+    {
+        "b_module": "snmp_connector",
+        "b_class": "SNMPBruteforce",
+        "b_port": 161,
+        "b_status": "brute_force_snmp",
+        "b_parent": null
+    },
+    {
+        "b_module": "steal_data_snmp",
+        "b_class": "StealDataSNMP",
+        "b_port": 161,
+        "b_status": "steal_data_snmp",
+        "b_parent": "SNMPBruteforce"
+    },
+    {
+        "b_module": "vnc_connector",
+        "b_class": "VNCBruteforce",
+        "b_port": 5900,
+        "b_status": "brute_force_vnc",
+        "b_parent": null
+    },
+    {
+        "b_module": "redis_connector",
+        "b_class": "RedisBruteforce",
+        "b_port": 6379,
+        "b_status": "brute_force_redis",
+        "b_parent": null
+    },
+    {
+        "b_module": "steal_data_redis",
+        "b_class": "StealDataRedis",
+        "b_port": 6379,
+        "b_status": "steal_data_redis",
+        "b_parent": "RedisBruteforce"
+    },
+    {
+        "b_module": "postgres_connector",
+        "b_class": "PostgresBruteforce",
+        "b_port": 5432,
+        "b_status": "brute_force_postgres",
+        "b_parent": null
+    },
+    {
+        "b_module": "steal_data_postgres",
+        "b_class": "StealDataPostgres",
+        "b_port": 5432,
+        "b_status": "steal_data_postgres",
+        "b_parent": "PostgresBruteforce"
+    },
+    {
+        "b_module": "pwnagotchi_sync",
+        "b_class": "PwnagotchiSync",
+        "b_port": null,
+        "b_status": "pwnagotchi_sync",
         "b_parent": null
     }
 ]

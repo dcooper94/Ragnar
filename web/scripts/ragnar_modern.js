@@ -3999,6 +3999,9 @@ async function loadConfigData() {
         // Load AI configuration
         loadAIConfiguration(config);
 
+        // Load Pwnagotchi peer sync configuration
+        loadPeerSyncConfig(config);
+
         // Load Pushover configuration
         loadPushoverConfiguration(config);
 
@@ -9632,13 +9635,41 @@ function updateManualPorts() {
     updateManualActions();
 }
 
+function _getPortVulns(selectedPort) {
+    if (!window.manualTargetsData || !selectedPort) return [];
+    const ipDropdown = document.getElementById('manual-ip-dropdown');
+    const ip = ipDropdown ? ipDropdown.value : '';
+    const target = window.manualTargetsData.find(t => t.ip === ip);
+    return (target && target.vuln_by_port) ? (target.vuln_by_port[selectedPort] || []) : [];
+}
+
+function _updateVulnIntelPanel(portVulns) {
+    const panel = document.getElementById('manual-vuln-intel');
+    const list = document.getElementById('manual-vuln-intel-list');
+    if (!panel || !list) return;
+    if (!portVulns.length) { panel.style.display = 'none'; return; }
+
+    const sevColor = { critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#22c55e' };
+    list.innerHTML = portVulns.map(v => {
+        const sev = (v.severity || 'unknown').toLowerCase();
+        const col = sevColor[sev] || '#94a3b8';
+        const cvss = v.cvss ? ` CVSS ${v.cvss}` : '';
+        return `<div style="display:flex;align-items:start;gap:8px;padding:4px 0;border-bottom:1px solid rgba(239,68,68,0.15)">
+            <span style="flex-shrink:0;font-size:10px;padding:1px 6px;border-radius:3px;background:${col}22;color:${col};font-weight:700;text-transform:uppercase;margin-top:1px">${sev}${cvss}</span>
+            <div style="flex:1;min-width:0">
+                <div style="font-size:12px;color:#fca5a5;font-weight:600;font-family:monospace">${v.cve}</div>
+                ${v.title ? `<div style="font-size:11px;color:#94a3b8;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v.title.replace(/"/g,'&quot;')}">${v.title}</div>` : ''}
+            </div>
+        </div>`;
+    }).join('');
+    panel.style.display = 'block';
+}
+
 function updateManualActions() {
     const portDropdown = document.getElementById('manual-port-dropdown');
     const actionDropdown = document.getElementById('manual-action-dropdown');
 
-    if (!actionDropdown) {
-        return;
-    }
+    if (!actionDropdown) return;
 
     const selectedPort = portDropdown ? portDropdown.value : '';
     const previousSelection = window.manualActionPreference || actionDropdown.value || '';
@@ -9646,29 +9677,47 @@ function updateManualActions() {
     actionDropdown.innerHTML = '<option value="">Select Action</option>';
     actionDropdown.disabled = true;
 
+    const portVulns = _getPortVulns(selectedPort);
+    _updateVulnIntelPanel(portVulns);
+
     if (!selectedPort) {
         setManualActionHelper('Select a port to view compatible attack modules.', 'muted');
         return;
     }
 
-    const validActions = getValidActionsForPort(selectedPort);
+    // CVE exploit options come first — these are specific to what was found on this host
+    portVulns.forEach(v => {
+        if (!v.cve) return;
+        const opt = document.createElement('option');
+        opt.value = `exploit_cve_${v.cve}`;
+        const sev = v.severity ? ` [${v.severity.toUpperCase()}]` : '';
+        const cvss = v.cvss ? ` CVSS ${v.cvss}` : '';
+        opt.textContent = `⚡ Exploit: ${v.cve}${cvss}${sev}`;
+        opt.dataset.isCveExploit = 'true';
+        opt.dataset.cve = v.cve;
+        opt.dataset.vulnText = v.title || '';
+        actionDropdown.appendChild(opt);
+    });
 
-    if (!validActions.length) {
+    // Generic port-based actions (brute force etc.)
+    const validActions = getValidActionsForPort(selectedPort);
+    validActions.forEach(action => {
+        const opt = document.createElement('option');
+        opt.value = action.key;
+        opt.textContent = action.label;
+        actionDropdown.appendChild(opt);
+    });
+
+    const totalOptions = portVulns.length + validActions.length;
+    if (!totalOptions) {
         setManualActionHelper(`No supported attack modules detected for port ${selectedPort}.`, 'warning');
         window.manualActionPreference = '';
         return;
     }
 
-    validActions.forEach(action => {
-        const option = document.createElement('option');
-        option.value = action.key;
-        option.textContent = action.label;
-        actionDropdown.appendChild(option);
-    });
-
     actionDropdown.disabled = false;
 
-    if (previousSelection && validActions.some(action => action.key === previousSelection)) {
+    if (previousSelection && (portVulns.some(v => `exploit_cve_${v.cve}` === previousSelection) || validActions.some(a => a.key === previousSelection))) {
         actionDropdown.value = previousSelection;
     } else {
         actionDropdown.value = '';
@@ -9678,6 +9727,13 @@ function updateManualActions() {
     if (actionDropdown.value) {
         window.manualActionPreference = actionDropdown.value;
         setManualActionHelper(`${actionDropdown.options[actionDropdown.selectedIndex].text} ready for port ${selectedPort}.`, 'success');
+    } else if (portVulns.length > 0) {
+        const critHigh = portVulns.filter(v => ['critical', 'high'].includes((v.severity || '').toLowerCase())).length;
+        if (critHigh > 0) {
+            setManualActionHelper(`⚡ ${critHigh} known exploit${critHigh > 1 ? 's' : ''} available! Select an exploit or brute force method.`, 'error');
+        } else {
+            setManualActionHelper(`Found ${portVulns.length} vuln${portVulns.length > 1 ? 's' : ''} + ${validActions.length} brute-force action${validActions.length !== 1 ? 's' : ''} for port ${selectedPort}.`, 'warning');
+        }
     } else {
         setManualActionHelper(`Found ${validActions.length} compatible ${validActions.length === 1 ? 'action' : 'actions'} on port ${selectedPort}. Choose one to proceed.`, 'success');
     }
@@ -9776,6 +9832,28 @@ async function executeManualAttack() {
         launchBtn.textContent = label || (busy ? 'Launching...' : 'Execute Attack');
     };
     
+    if (action && action.startsWith('exploit_cve_')) {
+        const cve = action.replace('exploit_cve_', '');
+        setButtonState(true, 'Exploiting...');
+        addConsoleMessage(`Launching exploit for ${cve} on ${ip}:${port}`, 'warning');
+        setManualAttackStatus(`Attempting exploitation of ${cve} on ${ip}:${port} — watch the log below`, 'warning');
+        appendManualAttackLog(`--- Exploit: ${cve} on ${ip}:${port} ---`, 'warning');
+        try {
+            const result = await postAPI('/api/manual/execute-exploit', { ip, port, cve });
+            if (result.success) {
+                appendManualAttackLog(result.message || 'Exploit started', 'info');
+            } else {
+                appendManualAttackLog(result.error || 'Failed to start exploit', 'error');
+                setManualAttackStatus(`Exploit failed to start: ${result.error || 'unknown'}`, 'error');
+            }
+        } catch (error) {
+            appendManualAttackLog(`Network error: ${error.message}`, 'error');
+            setManualAttackStatus(`Network error: ${error.message}`, 'error');
+        }
+        setTimeout(() => setButtonState(false), 1200);
+        return;
+    }
+
     if (!ip || !port || !action) {
         addConsoleMessage('Please select IP, Port, and Action for manual attack', 'error');
         setManualAttackStatus('Please select a target IP, port, and action before launching.', 'error');
@@ -11342,9 +11420,142 @@ async function saveConfig(form) {
     }
 }
 
+// ===================================================================
+//  Pwnagotchi Peer Sync
+// ===================================================================
+
+async function loadPeerSyncConfig(config) {
+    if (!config) return;
+    const el = (id) => document.getElementById(id);
+
+    if (el('peer-sync-enabled'))    el('peer-sync-enabled').checked  = !!config.pwnagotchi_peer_enabled;
+    if (el('peer-sync-ip'))         el('peer-sync-ip').value          = config.pwnagotchi_peer_ip || '';
+    if (el('peer-sync-user'))       el('peer-sync-user').value        = config.pwnagotchi_peer_ssh_user || 'root';
+    if (el('peer-sync-password'))   el('peer-sync-password').value    = config.pwnagotchi_peer_ssh_password || '';
+    if (el('peer-sync-key'))        el('peer-sync-key').value         = config.pwnagotchi_peer_ssh_key || '';
+    if (el('peer-sync-dir'))        el('peer-sync-dir').value         = config.pwnagotchi_peer_handshake_dir || '/root/handshakes';
+
+    await refreshPeerSyncStatus();
+}
+
+async function refreshPeerSyncStatus() {
+    try {
+        const data = await fetchAPI('/api/pwnagotchi/peer-status');
+        const el = (id) => document.getElementById(id);
+
+        if (data.last_sync && el('peer-sync-last')) {
+            el('peer-sync-last').classList.remove('hidden');
+            const d = new Date(data.last_sync);
+            el('peer-sync-last-time').textContent = isNaN(d) ? data.last_sync : d.toLocaleString();
+        }
+        if (el('peer-sync-handshake-count')) el('peer-sync-handshake-count').textContent = data.handshake_count || 0;
+        if (el('peer-sync-cracked-count'))   el('peer-sync-cracked-count').textContent   = data.cracked_total  || 0;
+
+        const badge = el('peer-cracked-badge');
+        if (badge && data.cracked_total > 0) {
+            badge.textContent = `${data.cracked_total} cracked`;
+            badge.classList.remove('hidden');
+        }
+    } catch (_) {}
+}
+
+async function savePeerSyncConfig() {
+    const el = (id) => document.getElementById(id);
+    const payload = {
+        pwnagotchi_peer_enabled:        el('peer-sync-enabled')  ? el('peer-sync-enabled').checked        : false,
+        pwnagotchi_peer_ip:             el('peer-sync-ip')?.value.trim()       || '',
+        pwnagotchi_peer_ssh_user:       el('peer-sync-user')?.value.trim()     || 'root',
+        pwnagotchi_peer_ssh_password:   el('peer-sync-password')?.value        || '',
+        pwnagotchi_peer_ssh_key:        el('peer-sync-key')?.value.trim()      || '',
+        pwnagotchi_peer_handshake_dir:  el('peer-sync-dir')?.value.trim()      || '/root/handshakes',
+    };
+
+    const statusEl = el('peer-sync-save-status');
+    try {
+        await fetchAPI('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (statusEl) { statusEl.textContent = 'Saved'; statusEl.classList.remove('hidden'); setTimeout(() => statusEl.classList.add('hidden'), 3000); }
+    } catch (e) {
+        if (statusEl) { statusEl.textContent = 'Save failed'; statusEl.classList.remove('hidden'); }
+    }
+}
+
+async function pwnPeerSyncNow() {
+    const btn = document.getElementById('peer-sync-btn');
+    const origText = btn?.textContent || 'Sync Now';
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+
+    try {
+        const result = await fetchAPI('/api/pwnagotchi/peer-sync', { method: 'POST' });
+        if (result.success) {
+            const cracked = result.cracked_total || 0;
+            showNotification(`Sync complete — ${cracked} WiFi password${cracked !== 1 ? 's' : ''} cracked`, 'success');
+            await refreshPeerSyncStatus();
+        } else {
+            showNotification(`Sync failed: ${result.error || 'unknown error'}`, 'error');
+        }
+    } catch (e) {
+        showNotification(`Sync error: ${e.message}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = origText; }
+    }
+}
+
 // AI Configuration Functions
+
+function onAIProviderChange() {
+    const provider = document.getElementById('ai-provider-select')?.value || 'openai';
+    const openaiFields = document.getElementById('ai-openai-fields');
+    const localFields = document.getElementById('ai-local-fields');
+    if (!openaiFields || !localFields) return;
+
+    if (provider === 'openai') {
+        openaiFields.classList.remove('hidden');
+        localFields.classList.add('hidden');
+    } else {
+        openaiFields.classList.add('hidden');
+        localFields.classList.remove('hidden');
+
+        // Pre-fill the default URL for known providers
+        const urlInput = document.getElementById('ai-base-url');
+        if (urlInput && !urlInput.value) {
+            const defaults = {
+                ollama:   'http://localhost:11434/v1',
+                lmstudio: 'http://localhost:1234/v1',
+            };
+            urlInput.placeholder = defaults[provider] || 'http://localhost:11434/v1';
+        }
+    }
+}
+
+async function saveAIProvider() {
+    const provider  = document.getElementById('ai-provider-select')?.value || 'openai';
+    const baseUrl   = document.getElementById('ai-base-url')?.value.trim() || '';
+    const localModel = document.getElementById('ai-local-model')?.value.trim() || '';
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMsg = document.getElementById('ai-config-status-message');
+
+    try {
+        const payload = { ai_provider: provider };
+        if (baseUrl)    payload.ai_base_url    = baseUrl;
+        if (localModel) payload.ai_local_model = localModel;
+
+        const result = await postAPI('/api/config', payload);
+
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700';
+        statusMsg.textContent = `✓ Local AI config saved (${provider}${localModel ? ' / ' + localModel : ''}). Re-enable AI Insights to apply.`;
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => statusDiv.classList.add('hidden'), 5000);
+    } catch (error) {
+        console.error('Failed to save AI provider config:', error);
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+        statusMsg.textContent = `✗ Failed to save AI config: ${error.message || 'unknown error'}`;
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => statusDiv.classList.add('hidden'), 5000);
+    }
+}
+
 async function loadAIConfiguration(config) {
-    // Mirror current configuration for AI enable toggle
+    // Enable toggle
     const aiEnabledCheckbox = document.getElementById('ai-enabled-toggle');
     if (aiEnabledCheckbox) {
         const aiEnabled = config && Object.prototype.hasOwnProperty.call(config, 'ai_enabled')
@@ -11352,14 +11563,30 @@ async function loadAIConfiguration(config) {
             : false;
         aiEnabledCheckbox.checked = aiEnabled;
     }
-    
+
+    // Provider selector
+    const providerSelect = document.getElementById('ai-provider-select');
+    if (providerSelect && config?.ai_provider) {
+        providerSelect.value = config.ai_provider;
+    }
+    onAIProviderChange();
+
+    // Local fields
+    const baseUrlInput = document.getElementById('ai-base-url');
+    if (baseUrlInput && config?.ai_base_url) {
+        baseUrlInput.value = config.ai_base_url;
+    }
+    const localModelInput = document.getElementById('ai-local-model');
+    if (localModelInput && config?.ai_local_model) {
+        localModelInput.value = config.ai_local_model;
+    }
+
     // Fetch token status from environment variable
     try {
         const tokenStatus = await fetchAPI('/api/ai/token');
         const apiTokenInput = document.getElementById('openai-api-token');
         if (apiTokenInput) {
             if (tokenStatus.configured && tokenStatus.token_preview) {
-                // Show preview of token
                 apiTokenInput.value = '';
                 apiTokenInput.placeholder = `Configured: ${tokenStatus.token_preview}`;
             } else {
@@ -12846,11 +13073,349 @@ function researchVulnerability(cveOrId) {
 }
 
 function exploitVulnerability(entry) {
-    const confirmMsg = `Are you sure you want to attempt exploitation of ${entry.cve || entry.description} on ${entry.host}?`;
-    if (confirm(confirmMsg)) {
-        showNetkbInfo('Exploitation feature not yet implemented - this would trigger automated exploit attempts');
-        // TODO: Implement actual exploitation logic
+    const cve = entry.cve || '';
+    const host = entry.host || '';
+    const port = (entry.port || '').toString().replace(/\/tcp|\/udp/i, '');
+    const service = entry.service || '';
+    openExploitModal(host, port, cve, service, entry.description || '');
+}
+
+function exploitVulnFromModal(vuln) {
+    const cveMatch = (vuln.vulnerability || '').match(/CVE-\d{4}-\d+/i);
+    const cve = cveMatch ? cveMatch[0].toUpperCase() : '';
+    const port = (vuln.port || '').toString().replace(/\/tcp|\/udp/i, '');
+    const svcMap = {
+        'netbios-ssn':'smb','netbios':'smb','microsoft-ds':'smb','msrpc':'smb',
+        'ms-wbt-server':'rdp','ssh':'ssh','ftp':'ftp','smtp':'smtp',
+        'http':'apache','https':'ssl','telnet':'telnet','vnc':'vnc',
+        'mysql':'mysql','ms-sql-s':'mssql','oracle':'oracle','postgresql':'postgresql',
+    };
+    const svc = (vuln.service || '').toLowerCase();
+    const service = svcMap[svc] || vuln.service || '';
+    openExploitModal(vuln.host || '', port, cve, service, vuln.vulnerability || '');
+}
+
+let _exploitPollTimer = null;
+
+function _injectExploitModal() {
+    const modal = document.createElement('div');
+    modal.id = 'exploit-launcher-modal';
+    modal.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.82);align-items:center;justify-content:center;z-index:9999;';
+    modal.innerHTML = `
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;padding:24px;max-width:760px;width:100%;margin:0 16px;max-height:90vh;overflow-y:auto">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+                <div style="display:flex;align-items:center;gap:12px">
+                    <div style="width:36px;height:36px;background:rgba(249,115,22,0.15);border-radius:8px;display:flex;align-items:center;justify-content:center">
+                        <svg width="20" height="20" fill="none" stroke="#fb923c" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    </div>
+                    <div>
+                        <h3 style="font-size:17px;font-weight:600;color:#f1f5f9;margin:0">Exploit Intelligence</h3>
+                        <span id="exploit-cve-badge" style="font-size:12px;color:#fb923c;font-family:monospace;background:rgba(249,115,22,0.15);padding:2px 8px;border-radius:4px"></span>
+                    </div>
+                </div>
+                <button onclick="closeExploitModal()" style="color:#94a3b8;background:none;border:none;cursor:pointer;padding:4px">
+                    <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+
+            <!-- Target inputs -->
+            <div style="background:rgba(30,41,59,0.6);border-radius:8px;padding:14px;margin-bottom:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <div>
+                    <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px">Target IP</label>
+                    <input id="exploit-target-ip" type="text" placeholder="10.0.0.1"
+                           style="width:100%;background:#1e293b;border:1px solid #475569;border-radius:6px;padding:6px 12px;font-size:13px;color:#f1f5f9;font-family:monospace;outline:none;box-sizing:border-box"/>
+                </div>
+                <div>
+                    <label style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px">Target Port</label>
+                    <input id="exploit-target-port" type="text" placeholder="443"
+                           style="width:100%;background:#1e293b;border:1px solid #475569;border-radius:6px;padding:6px 12px;font-size:13px;color:#f1f5f9;font-family:monospace;outline:none;box-sizing:border-box"/>
+                </div>
+            </div>
+
+            <!-- Loading spinner -->
+            <div id="exploit-loading" style="text-align:center;padding:40px 0">
+                <div style="width:32px;height:32px;border:2px solid #f97316;border-top-color:transparent;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 12px"></div>
+                <div style="color:#94a3b8;font-size:13px">Fetching exploit intelligence...</div>
+            </div>
+
+            <!-- NVD CVE info panel -->
+            <div id="exploit-nvd-panel" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px;margin-bottom:16px"></div>
+
+            <!-- Confirmed exploit refs from scan + NVD -->
+            <div id="exploit-refs-section" style="display:none;margin-bottom:16px">
+                <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Known Exploits</div>
+                <div id="exploit-refs-results" style="display:flex;flex-direction:column;gap:8px"></div>
+            </div>
+
+            <!-- searchsploit local results -->
+            <div id="exploit-searchsploit-section" style="display:none;margin-bottom:16px">
+                <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">searchsploit (local)</div>
+                <div id="exploit-searchsploit-results" style="display:flex;flex-direction:column;gap:8px"></div>
+            </div>
+
+            <!-- Metasploit modules -->
+            <div id="exploit-msf-section" style="display:none;margin-bottom:16px">
+                <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Metasploit Modules</div>
+                <div id="exploit-msf-results" style="display:flex;flex-direction:column;gap:8px"></div>
+            </div>
+
+            <!-- CVE reference links -->
+            <div id="exploit-cve-links-section" style="display:none;margin-bottom:16px">
+                <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Search & Reference</div>
+                <div id="exploit-cve-links" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+            </div>
+
+            <!-- Install hint when no tools present -->
+            <div id="exploit-install-hint" style="display:none;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px;margin-bottom:16px">
+                <div style="font-size:13px;font-weight:600;color:#fbbf24;margin-bottom:8px">Install searchsploit for local exploit lookup</div>
+                <div style="font-size:12px;color:#94a3b8;margin-bottom:10px">Run these commands on your Ragnar device to enable offline exploit searching:</div>
+                <code style="display:block;background:#0f172a;border-radius:6px;padding:10px;font-size:11px;color:#86efac;white-space:pre-wrap;font-family:monospace">git clone https://gitlab.com/exploit-database/exploitdb.git /opt/exploitdb
+ln -sf /opt/exploitdb/searchsploit /usr/local/bin/searchsploit
+searchsploit -u</code>
+            </div>
+
+            <!-- No results fallback -->
+            <div id="exploit-no-results" style="display:none;text-align:center;padding:32px 0;color:#64748b;font-size:13px">
+                No exploit data found for this vulnerability.
+            </div>
+
+            <!-- MSF output console -->
+            <div id="exploit-output-section" style="display:none;margin-top:16px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                    <span style="font-size:13px;font-weight:600;color:#e2e8f0">Exploit Output</span>
+                    <span id="exploit-output-status" style="font-size:11px;color:#94a3b8">Running...</span>
+                </div>
+                <div id="exploit-output"
+                     style="background:#000;border:1px solid #334155;border-radius:8px;padding:14px;font-family:monospace;font-size:11px;color:#4ade80;height:200px;overflow-y:auto;white-space:pre-wrap;line-height:1.5"></div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+function openExploitModal(host, port, cve, service, vulnText) {
+    if (!document.getElementById('exploit-launcher-modal')) {
+        _injectExploitModal();
     }
+    document.getElementById('exploit-target-ip').value = host;
+    document.getElementById('exploit-target-port').value = port;
+    document.getElementById('exploit-cve-badge').textContent = cve || service || 'Unknown';
+    document.getElementById('exploit-loading').style.display = 'block';
+    document.getElementById('exploit-nvd-panel').style.display = 'none';
+    document.getElementById('exploit-refs-section').style.display = 'none';
+    document.getElementById('exploit-searchsploit-section').style.display = 'none';
+    document.getElementById('exploit-msf-section').style.display = 'none';
+    document.getElementById('exploit-cve-links-section').style.display = 'none';
+    document.getElementById('exploit-install-hint').style.display = 'none';
+    document.getElementById('exploit-no-results').style.display = 'none';
+    document.getElementById('exploit-output-section').style.display = 'none';
+    document.getElementById('exploit-refs-results').innerHTML = '';
+    document.getElementById('exploit-searchsploit-results').innerHTML = '';
+    document.getElementById('exploit-msf-results').innerHTML = '';
+    document.getElementById('exploit-launcher-modal').style.display = 'flex';
+    _loadExploitLookup(cve, service, vulnText || '');
+}
+
+function closeExploitModal() {
+    const modal = document.getElementById('exploit-launcher-modal');
+    if (modal) modal.style.display = 'none';
+    if (_exploitPollTimer) { clearInterval(_exploitPollTimer); _exploitPollTimer = null; }
+}
+
+function _cvssColor(score) {
+    if (!score) return '#94a3b8';
+    if (score >= 9.0) return '#ef4444';
+    if (score >= 7.0) return '#f97316';
+    if (score >= 4.0) return '#eab308';
+    return '#22c55e';
+}
+
+function _exploitRefHtml(r) {
+    const icons = {exploitdb: '⚡', github: '', metasploit: '🔧', packetstorm: '💥', seebug: '🔍', vulners: '🔗'};
+    const icon = icons[r.type] || '🔗';
+    const btnColor = r.type === 'exploitdb' ? '#991b1b' : r.type === 'github' ? '#1d4ed8' : '#334155';
+    return `<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div style="flex:1;min-width:0">
+            <div style="font-size:13px;color:#fca5a5;font-weight:600">${icon} ${r.title}</div>
+            <div style="font-size:11px;color:#64748b;font-family:monospace;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.url}</div>
+        </div>
+        <a href="${r.url}" target="_blank" rel="noopener noreferrer"
+           style="flex-shrink:0;padding:5px 12px;background:${btnColor};color:#fff;border-radius:6px;font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap">Open ↗</a>
+    </div>`;
+}
+
+async function _loadExploitLookup(cve, service, vulnText) {
+    try {
+        const resp = await fetch('/api/exploit/lookup', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({cve, service, vuln_text: vulnText})
+        });
+        const data = await resp.json();
+        document.getElementById('exploit-loading').style.display = 'none';
+        let hasResults = false;
+
+        // NVD CVE info panel
+        const nvd = data.nvd_info || {};
+        if (nvd.description || nvd.cvss_score) {
+            hasResults = true;
+            const scoreColor = _cvssColor(nvd.cvss_score);
+            const severityLabel = nvd.cvss_severity || (nvd.cvss_score >= 9 ? 'CRITICAL' : nvd.cvss_score >= 7 ? 'HIGH' : nvd.cvss_score >= 4 ? 'MEDIUM' : 'LOW');
+            let nvdHtml = '';
+            if (data.has_exploit_marker) {
+                nvdHtml += `<div style="background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;padding:8px 12px;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+                    <span style="font-size:16px">⚡</span>
+                    <span style="color:#fca5a5;font-weight:700;font-size:12px">nmap confirmed a working exploit exists for this vulnerability</span>
+                </div>`;
+            }
+            if (nvd.cvss_score) {
+                nvdHtml += `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+                    <span style="font-size:22px;font-weight:700;color:${scoreColor}">${nvd.cvss_score}</span>
+                    <span style="padding:2px 8px;background:${scoreColor}22;color:${scoreColor};border-radius:4px;font-size:11px;font-weight:700">${severityLabel}</span>
+                    ${nvd.cwe ? `<span style="font-size:11px;color:#94a3b8;font-family:monospace">${nvd.cwe}</span>` : ''}
+                    ${nvd.published ? `<span style="font-size:11px;color:#64748b">Published: ${nvd.published}</span>` : ''}
+                </div>`;
+            }
+            if (nvd.description) {
+                nvdHtml += `<div style="font-size:12px;color:#cbd5e1;line-height:1.6">${nvd.description}</div>`;
+            }
+            if (nvd.cvss_vector) {
+                nvdHtml += `<div style="font-size:10px;color:#64748b;font-family:monospace;margin-top:6px">${nvd.cvss_vector}</div>`;
+            }
+            const panel = document.getElementById('exploit-nvd-panel');
+            panel.innerHTML = nvdHtml;
+            panel.style.display = 'block';
+        } else if (data.has_exploit_marker) {
+            hasResults = true;
+            const panel = document.getElementById('exploit-nvd-panel');
+            panel.innerHTML = `<div style="background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;padding:8px 12px;display:flex;align-items:center;gap:8px">
+                <span style="font-size:16px">⚡</span>
+                <span style="color:#fca5a5;font-weight:700;font-size:12px">nmap confirmed a working exploit exists for this vulnerability</span>
+            </div>`;
+            panel.style.display = 'block';
+        } else if (nvd.error) {
+            const panel = document.getElementById('exploit-nvd-panel');
+            panel.innerHTML = `<div style="font-size:12px;color:#64748b">${nvd.error}</div>`;
+            panel.style.display = 'block';
+        }
+
+        // Known exploit refs (from scan text + NVD references)
+        if (data.scan_refs && data.scan_refs.length > 0) {
+            hasResults = true;
+            document.getElementById('exploit-refs-results').innerHTML = data.scan_refs.map(_exploitRefHtml).join('');
+            document.getElementById('exploit-refs-section').style.display = 'block';
+        }
+
+        // searchsploit local results
+        if (data.searchsploit && data.searchsploit.length > 0) {
+            hasResults = true;
+            document.getElementById('exploit-searchsploit-results').innerHTML = data.searchsploit.map(e => {
+                const safeTitle = e.title.replace(/'/g, "\\'");
+                const safePath = (e.path || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+                const edbUrl = e.url || (e.edb_id ? `https://www.exploit-db.com/exploits/${e.edb_id}` : '');
+                return `<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;display:flex;align-items:start;justify-content:space-between;gap:10px">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:13px;color:#f1f5f9;font-weight:500">⚡ ${e.title}</div>
+                        <div style="font-size:11px;color:#64748b;font-family:monospace;margin-top:2px">${e.path}</div>
+                        ${e.type ? `<span style="font-size:10px;background:#334155;color:#94a3b8;padding:1px 6px;border-radius:3px;margin-top:4px;display:inline-block">${e.type}</span>` : ''}
+                    </div>
+                    <div style="display:flex;gap:6px;flex-shrink:0">
+                        ${edbUrl ? `<a href="${edbUrl}" target="_blank" rel="noopener noreferrer" style="padding:5px 10px;background:#991b1b;color:#fff;border-radius:6px;font-size:11px;font-weight:700;text-decoration:none">View ↗</a>` : ''}
+                        <button onclick="copyExploitPath('${safePath}')" style="padding:5px 10px;background:#334155;color:#e2e8f0;border:none;border-radius:6px;font-size:11px;cursor:pointer">Copy</button>
+                    </div>
+                </div>`;
+            }).join('');
+            document.getElementById('exploit-searchsploit-section').style.display = 'block';
+        }
+
+        // Metasploit modules
+        if (data.metasploit && data.metasploit.length > 0) {
+            hasResults = true;
+            document.getElementById('exploit-msf-results').innerHTML = data.metasploit.map(m => {
+                const safeName = m.name.replace(/'/g, "\\'");
+                return `<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;display:flex;align-items:start;justify-content:space-between;gap:10px">
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:12px;color:#fb923c;font-family:monospace">${m.name}</div>
+                        <div style="font-size:11px;color:#94a3b8;margin-top:2px">${m.description}</div>
+                        ${m.rank ? `<span style="font-size:10px;background:#334155;color:#94a3b8;padding:1px 6px;border-radius:3px;margin-top:4px;display:inline-block">${m.rank}</span>` : ''}
+                    </div>
+                    ${data.msf_available ? `<button onclick="launchMsfExploit('${safeName}')" style="flex-shrink:0;padding:6px 12px;background:#ea580c;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer">Launch</button>` : ''}
+                </div>`;
+            }).join('');
+            document.getElementById('exploit-msf-section').style.display = 'block';
+        }
+
+        // CVE reference links
+        if (data.cve_links && data.cve_links.length > 0) {
+            hasResults = true;
+            document.getElementById('exploit-cve-links').innerHTML = data.cve_links.map(l =>
+                `<a href="${l.url}" target="_blank" rel="noopener noreferrer"
+                    style="padding:5px 12px;background:#1e293b;border:1px solid #334155;border-radius:6px;font-size:12px;color:#e2e8f0;text-decoration:none">${l.name} ↗</a>`
+            ).join('');
+            document.getElementById('exploit-cve-links-section').style.display = 'block';
+        }
+
+        // Show install hint when no local tools and no scan refs found
+        if (!data.searchsploit_available && !data.msf_available && (!data.scan_refs || data.scan_refs.length === 0)) {
+            document.getElementById('exploit-install-hint').style.display = 'block';
+        }
+
+        if (!hasResults) {
+            document.getElementById('exploit-no-results').style.display = 'block';
+        }
+    } catch (e) {
+        document.getElementById('exploit-loading').style.display = 'none';
+        const noRes = document.getElementById('exploit-no-results');
+        noRes.textContent = 'Error loading exploit data: ' + e.message;
+        noRes.style.display = 'block';
+    }
+}
+
+async function launchMsfExploit(module) {
+    const targetIp = document.getElementById('exploit-target-ip').value.trim();
+    const targetPort = document.getElementById('exploit-target-port').value.trim();
+    if (!targetIp) { showNotification('Enter a target IP address', 'error'); return; }
+    if (!confirm(`Launch Metasploit module:\n  ${module}\nagainst ${targetIp}${targetPort ? ':' + targetPort : ''}\n\nOnly proceed against systems you own or have explicit authorization to test.`)) return;
+
+    try {
+        const resp = await fetch('/api/exploit/run', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({module, target_ip: targetIp, target_port: targetPort})
+        });
+        const data = await resp.json();
+        if (!data.success) { showNotification(data.error || 'Failed to launch exploit', 'error'); return; }
+
+        const outputSection = document.getElementById('exploit-output-section');
+        const outputEl = document.getElementById('exploit-output');
+        const statusEl = document.getElementById('exploit-output-status');
+        outputSection.style.display = 'block';
+        outputEl.textContent = 'Starting msfconsole...\n';
+        statusEl.textContent = 'Running...';
+        statusEl.className = 'text-xs text-yellow-400';
+
+        const jobId = data.job_id;
+        _exploitPollTimer = setInterval(async () => {
+            try {
+                const r = await fetch('/api/exploit/output/' + jobId);
+                const job = await r.json();
+                outputEl.textContent = job.output || '';
+                outputEl.scrollTop = outputEl.scrollHeight;
+                if (job.done) {
+                    clearInterval(_exploitPollTimer); _exploitPollTimer = null;
+                    statusEl.textContent = `Done (exit ${job.exit_code ?? 'N/A'})`;
+                    statusEl.className = 'text-xs ' + (job.exit_code === 0 ? 'text-green-400' : 'text-red-400');
+                    if (job.error) { statusEl.textContent = 'Error: ' + job.error; statusEl.className = 'text-xs text-red-400'; }
+                }
+            } catch (_) {}
+        }, 2000);
+    } catch (e) {
+        showNotification('Launch error: ' + e.message, 'error');
+    }
+}
+
+function copyExploitPath(path) {
+    navigator.clipboard.writeText(path).then(() => showNotification('Path copied to clipboard', 'success'));
 }
 
 function showNetkbSuccess(message) {
@@ -12946,6 +13511,11 @@ window.exportNetkbEntry = exportNetkbEntry;
 window.researchEntry = researchEntry;
 window.researchVulnerability = researchVulnerability;
 window.exploitVulnerability = exploitVulnerability;
+window.exploitVulnFromModal = exploitVulnFromModal;
+window.openExploitModal = openExploitModal;
+window.closeExploitModal = closeExploitModal;
+window.launchMsfExploit = launchMsfExploit;
+window.copyExploitPath = copyExploitPath;
 
 // Deep Scan Functions
 window.triggerDeepScan = triggerDeepScan;
@@ -13186,7 +13756,7 @@ function displayGroupedVulnerabilities(data) {
                                                 </div>
                                                 <div class="text-sm text-white font-mono">${vulnText}</div>
                                             </div>
-                                            <button onclick='showVulnerabilityDetails(${JSON.stringify(vuln).replace(/'/g, "\\'")})' 
+                                            <button onclick='showVulnerabilityDetails(${JSON.stringify({...vuln, host: hostData.ip}).replace(/'/g, "\\'")})' 
                                                     class="ml-2 text-Ragnar-400 hover:text-Ragnar-300 text-xs">
                                                 Details
                                             </button>
@@ -13220,9 +13790,10 @@ function toggleHostDetails(hostId) {
 
 // Show vulnerability details modal
 function showVulnerabilityDetails(vuln) {
+    window._currentThreatVuln = vuln;
     const modal = document.getElementById('vulnerability-detail-modal');
     const content = document.getElementById('vuln-detail-content');
-    
+
     const severityColors = {
         'critical': 'text-red-400',
         'high': 'text-orange-400',
@@ -13232,49 +13803,61 @@ function showVulnerabilityDetails(vuln) {
     
     // Extract CVE IDs from vulnerability text and create links
     function formatVulnerabilityWithLinks(vulnText) {
-        // Match CVE patterns (CVE-YYYY-NNNNN)
-        const cvePattern = /(CVE-\d{4}-\d{4,7})/gi;
-        const cves = vulnText.match(cvePattern);
-        
-        if (!cves || cves.length === 0) {
+        // Match CVE-YYYY-N+ and validate year (1999 to current+1) to exclude junk matches
+        const currentYear = new Date().getFullYear();
+        const cvePattern = /CVE-(\d{4})-(\d+)/gi;
+        const validCVEs = [];
+        let m;
+        while ((m = cvePattern.exec(vulnText)) !== null) {
+            const year = parseInt(m[1], 10);
+            if (year >= 1999 && year <= currentYear + 1) {
+                validCVEs.push(m[0].toUpperCase());
+            }
+        }
+
+        const uniqueCVEs = [...new Set(validCVEs)];
+
+        if (uniqueCVEs.length === 0) {
             return `<div class="text-white font-mono text-sm break-all">${vulnText}</div>`;
         }
-        
+
         // Create links section
         let linksHtml = '<div class="mt-3 pt-3 border-t border-slate-700">';
-        linksHtml += '<div class="text-sm text-slate-400 mb-2">CVE References:</div>';
+        linksHtml += '<div class="flex items-center gap-2 mb-2">';
+        linksHtml += '<span class="text-sm text-slate-400">CVE References</span>';
+        linksHtml += '<span class="text-xs px-2 py-0.5 rounded-full bg-yellow-900/50 text-yellow-300 border border-yellow-700/40" title="Detected by service version fingerprint — not confirmed exploitable">version-based</span>';
+        linksHtml += '</div>';
         linksHtml += '<div class="flex flex-wrap gap-2">';
-        
-        const uniqueCVEs = [...new Set(cves)]; // Remove duplicates
+
         uniqueCVEs.forEach(cve => {
             const nvdUrl = `https://nvd.nist.gov/vuln/detail/${cve}`;
             const mitreUrl = `https://cve.mitre.org/cgi-bin/cvename.cgi?name=${cve}`;
-            
+
             linksHtml += `
                 <div class="bg-slate-700/50 rounded px-3 py-2 flex items-center space-x-2">
                     <span class="text-Ragnar-400 font-mono text-sm">${cve}</span>
-                    <a href="${nvdUrl}" target="_blank" rel="noopener noreferrer" 
-                       class="text-blue-400 hover:text-blue-300 transition-colors" 
+                    <a href="${nvdUrl}" target="_blank" rel="noopener noreferrer"
+                       class="text-blue-400 hover:text-blue-300 transition-colors"
                        title="View on NIST NVD">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                   d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path>
                         </svg>
                     </a>
-                    <a href="${mitreUrl}" target="_blank" rel="noopener noreferrer" 
-                       class="text-green-400 hover:text-green-300 transition-colors" 
+                    <a href="${mitreUrl}" target="_blank" rel="noopener noreferrer"
+                       class="text-green-400 hover:text-green-300 transition-colors"
                        title="View on MITRE">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                   d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                         </svg>
                     </a>
                 </div>
             `;
         });
-        
+
         linksHtml += '</div></div>';
-        
+
         return `<div class="text-white font-mono text-sm break-all">${vulnText}</div>${linksHtml}`;
     }
     
@@ -13284,13 +13867,17 @@ function showVulnerabilityDetails(vuln) {
                 <div class="text-sm text-slate-400 mb-1">Severity</div>
                 <div class="${severityColors[vuln.severity]} text-2xl font-bold uppercase">${vuln.severity}</div>
             </div>
-            
+
             <div class="bg-slate-800/50 rounded-lg p-4">
                 <div class="text-sm text-slate-400 mb-1">Vulnerability</div>
                 ${formatVulnerabilityWithLinks(vuln.vulnerability)}
             </div>
-            
+
             <div class="grid grid-cols-2 gap-4">
+                <div class="bg-slate-800/50 rounded-lg p-4">
+                    <div class="text-sm text-slate-400 mb-1">Host</div>
+                    <div class="text-white font-mono">${vuln.host || 'Unknown'}</div>
+                </div>
                 <div class="bg-slate-800/50 rounded-lg p-4">
                     <div class="text-sm text-slate-400 mb-1">Service</div>
                     <div class="text-white">${vuln.service}</div>
@@ -13299,20 +13886,29 @@ function showVulnerabilityDetails(vuln) {
                     <div class="text-sm text-slate-400 mb-1">Port</div>
                     <div class="text-white">${vuln.port}</div>
                 </div>
+                <div class="bg-slate-800/50 rounded-lg p-4">
+                    <div class="text-sm text-slate-400 mb-1">Status</div>
+                    <div class="text-white capitalize">${vuln.status}</div>
+                </div>
             </div>
-            
+
             <div class="bg-slate-800/50 rounded-lg p-4">
                 <div class="text-sm text-slate-400 mb-1">Discovered</div>
                 <div class="text-white">${new Date(vuln.discovered).toLocaleString()}</div>
             </div>
-            
-            <div class="bg-slate-800/50 rounded-lg p-4">
-                <div class="text-sm text-slate-400 mb-1">Status</div>
-                <div class="text-white capitalize">${vuln.status}</div>
+
+            <div class="pt-2">
+                <button onclick="exploitVulnFromModal(window._currentThreatVuln)"
+                        class="w-full py-2.5 px-4 bg-orange-600 hover:bg-orange-500 text-white font-semibold rounded-lg flex items-center justify-center gap-2 transition-colors">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                    Exploit Options
+                </button>
             </div>
         </div>
     `;
-    
+
     modal.classList.remove('hidden');
     modal.classList.add('flex');
 }

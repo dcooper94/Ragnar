@@ -563,24 +563,33 @@ class NmapVulnScanner:
             # Parse vulnerability lines (lines starting with |)
             if line.startswith('|'):
                 cleaned_line = line.lstrip('|').strip()
-                
-                # Skip empty lines and section headers
+
                 if not cleaned_line:
                     continue
-                
-                # Look for vulnerability indicators
-                if any(keyword in cleaned_line for keyword in ("CVE-", "VULNERABLE", "*EXPLOIT*", 
-                                                                "PACKETSTORM:", "cpe:/", "SNYK:",
-                                                                "1337DAY-ID-", "SSV:", "CNVD-")):
+
+                # vuln.nse confirmed detections (e.g. smb-vuln-ms17-010) — always keep
+                if 'VULNERABLE' in cleaned_line and 'CVE-' not in cleaned_line:
                     port_vulnerabilities.setdefault(current_port, []).append(cleaned_line)
                     summary_entries.add(f"{current_port}/{current_service}: {cleaned_line}")
                     continue
-                
-                # Also capture lines with vulnerability scores (numeric patterns)
-                score_pattern = re.search(r'\s+(\d+\.\d+|\d+)\s+https?://', cleaned_line)
-                if score_pattern and in_vulners_section:
-                    port_vulnerabilities.setdefault(current_port, []).append(cleaned_line)
-                    summary_entries.add(f"{current_port}/{current_service}: {cleaned_line}")
+
+                # Only keep lines that carry a real CVE ID — skip UUID/hash/SSV/SNYK etc.
+                if 'CVE-' not in cleaned_line:
+                    continue
+
+                # Extract CVSS score; skip if below 7.0 (medium/low noise)
+                score_val = None
+                score_m = re.search(r'CVE-\d{4}-\d+\s+(\d{1,2}\.\d)', cleaned_line)
+                if score_m:
+                    try:
+                        score_val = float(score_m.group(1))
+                    except ValueError:
+                        pass
+                if score_val is not None and score_val < 7.0:
+                    continue
+
+                port_vulnerabilities.setdefault(current_port, []).append(cleaned_line)
+                summary_entries.add(f"{current_port}/{current_service}: {cleaned_line}")
 
         summary = "; ".join(sorted(summary_entries))
         return summary, port_vulnerabilities, port_services
@@ -590,8 +599,13 @@ class NmapVulnScanner:
         normalized_text = vulnerability_text
         severity = "medium"
 
-        cve_match = re.search(r"(CVE-\d{4}-\d+)", vulnerability_text)
-        
+        cve_match = re.search(r"(CVE-(\d{4})-\d+)", vulnerability_text)
+        # Reject CVE IDs with impossible years (vulners can return junk matches)
+        if cve_match:
+            cve_year = int(cve_match.group(2))
+            if not (1999 <= cve_year <= datetime.now().year + 1):
+                cve_match = None
+
         # Look for CVSS score AFTER the CVE ID to avoid matching the year in CVE-YYYY-NNNNN
         # CVSS scores are typically 0.0-10.0, so we look for patterns like "7.5" or standalone decimals
         # that appear after any CVE ID in the text
@@ -605,7 +619,7 @@ class NmapVulnScanner:
             score_match = re.search(r'(\d{1,2}\.\d+)', vulnerability_text)
 
         if cve_match:
-            normalized_text = cve_match.group(1)
+            normalized_text = cve_match.group(1)  # group(1) is the full CVE-YYYY-NNN string
             if score_match:
                 try:
                     score_value = float(score_match.group(1))
@@ -646,13 +660,22 @@ class NmapVulnScanner:
                 service = port_services.get(port_str, "unknown")
 
                 for vulnerability in vulnerabilities:
-                    # FILTER: Only add real vulnerabilities with identifiers
-                    # Skip generic/empty vulnerability entries
-                    if not any(keyword in vulnerability for keyword in ["CVE-", "EXPLOIT", "VULNERABLE", 
-                                                                         "PACKETSTORM:", "1337DAY", "SSV:", 
-                                                                         "CNVD-", "SNYK:"]):
-                        logger.debug(f"Skipping non-specific vulnerability entry: {vulnerability[:50]}...")
+                    # Require a real CVE or a confirmed VULNERABLE marker
+                    has_cve = 'CVE-' in vulnerability
+                    is_confirmed = 'VULNERABLE' in vulnerability and not has_cve
+                    if not has_cve and not is_confirmed:
+                        logger.debug(f"Skipping non-CVE entry: {vulnerability[:50]}...")
                         continue
+
+                    # Skip low/medium CVEs (score < 7.0) — reduce noise
+                    if has_cve:
+                        sm = re.search(r'CVE-\d{4}-\d+\s+(\d{1,2}\.\d)', vulnerability)
+                        if sm:
+                            try:
+                                if float(sm.group(1)) < 7.0:
+                                    continue
+                            except ValueError:
+                                pass
                     
                     severity, normalized_text = self.determine_severity(vulnerability)
                     
@@ -677,6 +700,29 @@ class NmapVulnScanner:
                         logger.info(f"Added VERIFIED vulnerability: {ip}:{port_str} - {normalized_text}")
                     except Exception as e:
                         logger.warning(f"Failed to add vulnerability to network intelligence: {e}")
+
+                    # Mirror to scan_findings so sync_vulnerability_count() has a stable SQL source
+                    try:
+                        cve_m = re.search(r'(CVE-\d{4}-\d+)', normalized_text)
+                        score_m = re.search(r'Score:\s*(\d{1,2}\.\d)', normalized_text)
+                        cve_id = cve_m.group(1) if cve_m else None
+                        cvss = float(score_m.group(1)) if score_m else None
+                        _fid = f"nmap-{ip}-{port_str}-{cve_id or normalized_text[:30].replace(' ','_')}"
+                        self.db.save_scan_finding(
+                            finding_id=_fid,
+                            scan_id="nmap_vulners",
+                            scanner="nmap-vulners",
+                            host=ip,
+                            port=int(port_str) if str(port_str).isdigit() else None,
+                            severity=severity,
+                            title=cve_id or normalized_text[:100],
+                            description=normalized_text,
+                            cve_ids=[cve_id] if cve_id else None,
+                            cvss_score=cvss,
+                            raw_output=vulnerability,
+                        )
+                    except Exception as sf_err:
+                        logger.debug(f"scan_findings write skipped: {sf_err}")
 
         except Exception as e:
             logger.error(f"Error feeding vulnerabilities to network intelligence: {e}")
