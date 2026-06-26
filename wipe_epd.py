@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -17,6 +18,10 @@ from epd_helper import EPDHelper
 
 REPO_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = REPO_ROOT / "config" / "shared_config.json"
+
+# How many times to retry if GPIO is busy (e.g. pwnagotchi/old process releasing slowly)
+_GPIO_RETRY_ATTEMPTS = 5
+_GPIO_RETRY_DELAY = 1.5  # seconds between retries
 
 
 def _read_epd_type_from_config() -> str | None:
@@ -55,17 +60,34 @@ def main() -> int:
         print("wipe_epd: no EPD type configured, skipping", file=sys.stderr)
         return 0
     # Non-EPD displays are managed by display.py — no wipe needed on restart
-    _NON_EPD_TYPES = ("max7219_4panel", "max7219_8panel", "ssd1306", "gc9a01")
+    _NON_EPD_TYPES = ("max7219_4panel", "max7219_8panel", "ssd1306", "gc9a01", "lcd1602")
     if epd_type in _NON_EPD_TYPES:
         print(f"wipe_epd: {epd_type} is not an e-paper display, skipping wipe")
         return 0
-    try:
-        wipe_display(epd_type)
-    except Exception as exc:  # pragma: no cover - hardware specific
-        print(f"wipe_epd: failed to clear display ({exc})", file=sys.stderr)
-        return 1
-    print(f"wipe_epd: cleared display using {epd_type}")
-    return 0
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _GPIO_RETRY_ATTEMPTS + 1):
+        try:
+            EPDHelper._release_epdconfig_gpio()
+            wipe_display(epd_type)
+            print(f"wipe_epd: cleared display using {epd_type}")
+            return 0
+        except Exception as exc:
+            last_exc = exc
+            busy = "busy" in str(exc).lower() or "in use" in str(exc).lower()
+            if busy and attempt < _GPIO_RETRY_ATTEMPTS:
+                print(
+                    f"wipe_epd: GPIO busy (attempt {attempt}/{_GPIO_RETRY_ATTEMPTS}), "
+                    f"retrying in {_GPIO_RETRY_DELAY}s...",
+                    file=sys.stderr,
+                )
+                EPDHelper._release_epdconfig_gpio()
+                time.sleep(_GPIO_RETRY_DELAY)
+            else:
+                break
+
+    print(f"wipe_epd: failed to clear display ({last_exc})", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
